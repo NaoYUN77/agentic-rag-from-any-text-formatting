@@ -1,0 +1,49 @@
+# Python / 环境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 密钥与本地配置
+.env
+.env.*
+*.key
+pipeline/.dashscope_key
+
+# 虚拟环境
+.venv/
+venv/
+pipeline/.venv_rag/
+
+# 向量库、索引产物与备份
+pipeline/qdrant_data/
+pipeline/index_artifacts/
+pipeline/backups/
+
+# 第三方语料(版权内容不进入公开仓库)
+pipeline/corpus/*.pdf
+pipeline/corpus/*.md
+!pipeline/corpus/README.md
+
+# 原始实验输出(可能包含第三方文档长文本)
+pipeline/experiments/*.txt
+pipeline/experiments/**/*.txt
+pipeline/experiments/*
+!pipeline/experiments/README.md
+!pipeline/experiments/findings/
+pipeline/experiments/findings/*
+!pipeline/experiments/findings/README.md
+!pipeline/experiments/findings/*.md
+
+# PDF 解析过程日志
+pipeline/corpus/*.log
+pipeline/corpus/*.log.err
+pipeline/corpus/*.err
+
+# 服务日志
+pipeline/server.log
+pipeline/server.err
+
+# 与本项目无关的嵌套仓库
+hello_agent_demo/

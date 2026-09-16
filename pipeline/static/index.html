@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG 检索调试</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --text:#1c2024; --muted:#6b7280;
+    --accent:#0f766e; --accent-weak:#e6f4f1;
+    --hi:#b45309; --hi-bg:#fef3c7;
+    --mid:#0369a1; --mid-bg:#e0f2fe;
+    --lo:#6b7280; --lo-bg:#f3f4f6;
+    --radius:6px;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+  }
+  header{
+    background:var(--panel); border-bottom:1px solid var(--line);
+    padding:14px 24px; display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    position:sticky; top:0; z-index:10;
+  }
+  h1{font-size:15px; font-weight:650; margin:0}
+  .meta{color:var(--muted); font-size:12.5px}
+  .meta b{color:var(--text); font-weight:600}
+  main{max-width:1080px; margin:0 auto; padding:20px 24px 60px}
+  .bar{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;
+  }
+  .field{display:flex; flex-direction:column; gap:5px}
+  .field.grow{flex:1; min-width:240px}
+  label{font-size:12px; color:var(--muted); font-weight:500}
+  input,select{
+    font:inherit; padding:8px 10px; border:1px solid var(--line);
+    border-radius:var(--radius); background:#fff; color:var(--text);
+  }
+  input:focus,select:focus{outline:2px solid var(--accent-weak); border-color:var(--accent)}
+  input[type=number]{width:76px}
+  button{
+    font:inherit; font-weight:550; padding:8px 18px; border-radius:var(--radius);
+    border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer;
+  }
+  button:hover{background:#0b5f59}
+  button:disabled{opacity:.5; cursor:default}
+  button.ghost{background:#fff; color:var(--text); border-color:var(--line)}
+  button.ghost:hover{background:var(--bg)}
+  .stats{
+    display:flex; gap:20px; flex-wrap:wrap;
+    padding:12px 2px; color:var(--muted); font-size:12.5px;
+  }
+  .stats b{color:var(--text); font-weight:600}
+  .warn{color:var(--hi)}
+  .hit{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    margin-bottom:10px; overflow:hidden;
+  }
+  .hit.top{border-color:#99d5cd; box-shadow:0 0 0 1px var(--accent-weak)}
+  .hit-head{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:9px 14px; border-bottom:1px solid var(--line); background:#fbfcfd;
+  }
+  .rank{font-weight:650; color:var(--muted); font-variant-numeric:tabular-nums}
+  .score{
+    font-weight:650; font-variant-numeric:tabular-nums; padding:1px 8px;
+    border-radius:999px; font-size:12.5px;
+  }
+  .score.hi{color:var(--hi); background:var(--hi-bg)}
+  .score.mid{color:var(--mid); background:var(--mid-bg)}
+  .score.lo{color:var(--lo); background:var(--lo-bg)}
+  .chip{
+    font-size:12px; color:var(--muted); background:var(--bg);
+    border:1px solid var(--line); border-radius:4px; padding:1px 7px;
+  }
+  .chip.sec{max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .chip.dense{color:#0f766e; background:var(--accent-weak); border-color:#b7ded9}
+  .chip.sparse{color:#7c3aed; background:#f3e8ff; border-color:#ddd0f7}
+  .chip.rrf{color:#b45309; background:#fef3c7; border-color:#f2dfa0}
+  .hit-body{padding:12px 14px; white-space:pre-wrap; word-break:break-word}
+  mark{background:var(--hi-bg); color:inherit; padding:0 1px; border-radius:2px}
+  .empty{color:var(--muted); text-align:center; padding:40px 0}
+  .err{
+    background:#fef2f2; border:1px solid #fecaca; color:#991b1b;
+    padding:10px 14px; border-radius:var(--radius); margin-bottom:12px;
+  }
+  .answer{
+    background:var(--panel); border:1px solid #99d5cd;
+    border-radius:var(--radius); margin-bottom:14px; overflow:hidden;
+  }
+  .answer-head{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:10px 14px; border-bottom:1px solid var(--line);
+    background:var(--accent-weak); color:var(--accent); font-weight:650;
+  }
+  .answer-body{padding:14px; white-space:pre-wrap; word-break:break-word}
+  .answer-body code{background:var(--bg); padding:1px 4px; border-radius:3px}
+  .cite-ref{color:var(--accent); font-weight:650}
+  .citations{
+    display:flex; gap:8px; flex-wrap:wrap;
+    padding:0 14px 14px; color:var(--muted); font-size:12px;
+  }
+  .citation{
+    border:1px solid var(--line); background:var(--bg);
+    border-radius:4px; padding:3px 8px;
+  }
+
+</style>
+</head>
+<body>
+<header>
+  <h1>RAG 检索调试</h1>
+  <div class="meta" id="info">加载中…</div>
+</header>
+
+<main>
+  <div class="bar">
+    <div class="field grow">
+      <label for="q">查询</label>
+      <input id="q" placeholder="输入问题，回车检索" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="task">任务</label>
+      <select id="task">
+        <option value="answer">问答生成</option>
+        <option value="search">仅检索</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="chatmodel">生成模型</label>
+      <select id="chatmodel">
+        <option value="qwen-turbo">qwen-turbo（快速）</option>
+        <option value="qwen-plus">qwen-plus（质量）</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="rerank">Rerank</label>
+      <label class="chip" style="display:flex;align-items:center;gap:6px;padding:8px 10px">
+        <input id="rerank" type="checkbox" checked> 启用
+      </label>
+    </div>
+    <div class="field">
+      <label for="mode">检索模式</label>
+      <select id="mode">
+        <option value="hybrid">Hybrid + RRF</option>
+        <option value="dense">仅 Dense</option>
+        <option value="sparse">仅 Sparse / BM25</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="k">top-k</label>
+      <input id="k" type="number" value="5" min="1" max="50">
+    </div>
+    <div class="field" style="min-width:180px">
+      <label for="sec">section 过滤（可选）</label>
+      <input id="sec" list="seclist" placeholder="留空 = 不过滤" autocomplete="off">
+      <datalist id="seclist"></datalist>
+    </div>
+    <button id="go">执行</button>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <div id="err"></div>
+  <div id="out"><div class="empty">输入查询开始检索</div></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+
+
+function scoreClass(v, mode){
+  if (mode === "hybrid") return "hi";
+  if (v >= 0.7) return "hi";
+  if (v >= 0.5) return "mid";
+  return "lo";
+}
+
+function highlight(text, query){
+  // 只高亮长度 >= 2 的词，避免噪声
+  const terms = query.split(/[\s,，。？?]+/).filter(t => t.length >= 2);
+  let out = esc(text);
+  for (const t of terms){
+    const re = new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    out = out.replace(re, m => `<mark>${m}</mark>`);
+  }
+  return out;
+}
+
+function formatAnswer(text){
+  let out = esc(text);
+  out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/\[C(\d+)\]/g, '<span class="cite-ref">[C$1]</span>');
+  return out;
+}
+
+async function loadInfo(){
+  try{
+    const r = await fetch("/api/info");
+    const d = await r.json();
+    $("info").innerHTML =
+      `集合 <b>${esc(d.collection)}</b> · ${d.points_count} 个点 · ` +
+      `sparse <b>${esc(d.sparse_collection)}</b> ${d.sparse_points_count} 点 · ` +
+      `${d.vector_size} 维 · ${esc(d.distance)} · <b>${esc(d.model)}</b>`;
+  }catch(e){
+    $("info").textContent = "无法连接服务";
+  }
+  try{
+    const r = await fetch("/api/sections");
+    const d = await r.json();
+    $("seclist").innerHTML = d.sections
+      .map(s => `<option value="${esc(s)}">`).join("");
+  }catch(e){}
+}
+
+async function doSearch(){
+  const query = $("q").value.trim();
+  if (!query) return;
+  const top_k = Math.max(1, Math.min(50, parseInt($("k").value) || 5));
+  const section = $("sec").value.trim();
+  const mode = $("mode").value;
+  const task = $("task").value;
+  const chatModel = $("chatmodel").value;
+  const rerank = $("rerank").checked;
+
+  $("go").disabled = true;
+  $("err").innerHTML = "";
+  $("out").innerHTML = `<div class="empty">检索中…</div>`;
+
+  try{
+    const endpoint = task === "answer" ? "/api/answer" : "/api/search";
+    const payload = {
+      query, top_k, section: section || null, mode,
+      candidate_k: 20, rrf_k: 60, rerank, rerank_candidate_k: 20
+    };
+    if (task === "answer"){
+      payload.context_k = top_k;
+      payload.max_context_chars = 6000;
+      payload.chat_model = chatModel;
+      payload.max_tokens = 700;
+    }
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+    if (!r.ok){
+      const t = await r.text();
+      throw new Error(`HTTP ${r.status} — ${t.slice(0,300)}`);
+    }
+    render(await r.json());
+  }catch(e){
+    $("err").innerHTML = `<div class="err">检索失败：${esc(e.message)}</div>`;
+    $("out").innerHTML = "";
+  }finally{
+    $("go").disabled = false;
+  }
+}
+
+function render(d){
+  const modeLabels = {hybrid:"Hybrid + RRF", dense:"仅 Dense", sparse:"仅 Sparse / BM25"};
+  const mode = d.mode || "hybrid";
+  const m = d.margin;
+  let marginTxt = "—";
+  let marginCls = "";
+  if (m !== null && m !== undefined){
+    marginTxt = m.toFixed(4);
+    if (m < (mode === "hybrid" ? 0.0005 : 0.01)) marginCls = "warn";
+  }
+  if (d.answer){
+    $("stats").innerHTML =
+      `查询 <b>${esc(d.query)}</b> · 模式 <b>${esc(modeLabels[mode] || mode)}</b> · ` +
+      `检索 <b>${d.retrieval_ms} ms</b> · 生成 <b>${d.generation_ms} ms</b> · ` +
+      `总耗时 <b>${d.elapsed_ms} ms</b> · 上下文 <b>${d.context_chars}</b> 字 · ` +
+      `模型 <b>${esc(d.model)}</b>` +
+      ` · Rerank <b>${d.rerank_applied ? "已启用" : "未启用"}</b>` +
+      (d.rerank_ms ? ` (${d.rerank_ms} ms)` : "") +
+      (d.filtered ? ` · <b>已过滤</b>` : "");
+  } else {
+    $("stats").innerHTML =
+      `查询 <b>${esc(d.query)}</b> · 模式 <b>${esc(modeLabels[mode] || mode)}</b> · ` +
+      `每路候选 <b>${d.candidate_k}</b> · RRF k <b>${d.rrf_k}</b> · ` +
+      `Rerank <b>${d.rerank_applied ? "已启用" : "未启用"}</b>` +
+      (d.rerank_ms ? ` (${d.rerank_ms} ms)` : "") + ` · ` +
+      `耗时 <b>${d.elapsed_ms} ms</b> · ` +
+      `返回 <b>${d.hits.length}</b> 条 · ` +
+      `top1-top2 分差 <b class="${marginCls}">${marginTxt}</b>` +
+      (marginCls ? ` <span class="warn">（几乎并列，排序不确定）</span>` : "") +
+      (d.filtered ? ` · <b>已过滤</b>` : "");
+    if (d.rerank_error) {
+      $("stats").innerHTML += `<br><span class="warn">Rerank 失败，已回退 RRF：${esc(d.rerank_error)}</span>`;
+    }
+  }
+
+  if (!d.hits.length){
+    $("out").innerHTML = `<div class="empty">没有结果</div>`;
+    return;
+  }
+
+  const answerHtml = d.answer ? `
+    <div class="answer">
+      <div class="answer-head"><span>回答</span><span>${esc(d.model)}</span></div>
+      <div class="answer-body">${formatAnswer(d.answer)}</div>
+      <div class="citations">
+        ${(d.citations || []).map(c => `
+          <span class="citation" title="${esc(c.section)}">
+            [C${c.index}] ${esc(c.file_name || "unknown")} · p${c.page ?? "?"}
+          </span>`).join("")}
+      </div>
+    </div>` : "";
+
+  $("out").innerHTML = answerHtml + d.hits.map((h, i) => `
+    <div class="hit ${i === 0 ? "top" : ""}">
+      <div class="hit-head">
+        <span class="rank">#${h.rank}</span>
+        <span class="score ${scoreClass(h.score, mode)}">${h.score.toFixed(mode === "hybrid" ? 5 : 4)}</span>
+        <span class="chip">ID ${esc(String(h.point_id))}</span>
+        ${h.dense_rank != null ? `<span class="chip dense">D#${h.dense_rank}</span>` : ""}
+        ${h.sparse_rank != null ? `<span class="chip sparse">S#${h.sparse_rank}</span>` : ""}
+        ${h.rrf_score != null ? `<span class="chip rrf">RRF ${h.rrf_score.toFixed(5)}</span>` : ""}
+        ${h.rerank_score != null ? `<span class="chip rrf">Rerank ${h.rerank_score.toFixed(4)}</span>` : ""}
+        ${h.pre_rerank_rank != null ? `<span class="chip">原排名 #${h.pre_rerank_rank}</span>` : ""}
+        <span class="chip">p${h.page ?? "?"}</span>
+        <span class="chip">${h.char_count ?? "?"} 字</span>
+        <span class="chip sec" title="${esc(h.section)}">${esc(h.section)}</span>
+      </div>
+      <div class="hit-body">${highlight(h.text, d.query)}</div>
+    </div>
+  `).join("");
+}
+
+$("go").onclick = doSearch;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+
+
+
+loadInfo();
+$("q").focus();
+</script>
+</body>
+</html>
+

@@ -1,0 +1,13 @@
+{"query_id":"rh_01","query":"什么是 keepalived","gold":[0,2],"source":"redhat","category":"semantic","split":"smoke"}
+{"query_id":"rh_02","query":"keepalived 如何实现故障转移","gold":[0,2,3,4],"source":"redhat","category":"semantic","split":"smoke"}
+{"query_id":"rh_03","query":"HAProxy 支持哪些负载均衡算法","gold":[1,6],"source":"redhat","category":"mixed","split":"smoke"}
+{"query_id":"rh_04","query":"virtual_ipaddress 在哪里配置","gold":[13,14,16],"source":"redhat","category":"exact","split":"smoke"}
+{"query_id":"rh_05","query":"arptables 和 iptables 有什么区别","gold":[18,19,20,21],"source":"redhat","category":"mixed","split":"smoke"}
+{"query_id":"rh_06","query":"VIP 是什么，故障时如何迁移","gold":[3,4,13,14],"source":"redhat","category":"multi_hop","split":"smoke"}
+{"query_id":"ngx_01","query":"nginx proxy_pass 如何配置反向代理","gold":[43,44,45,46,47,57,62],"source":"nginx","category":"exact","split":"smoke"}
+{"query_id":"ngx_02","query":"nginx stream 模块如何做 TCP 负载均衡","gold":[45,46,47,57,62],"source":"nginx","category":"mixed","split":"smoke"}
+{"query_id":"ngx_03","query":"nginx 如何配置上游健康检查","gold":[43,57,58],"source":"nginx","category":"semantic","split":"smoke"}
+{"query_id":"ngx_04","query":"nginx limit_req 如何做请求限流","gold":[74,77,79],"source":"nginx","category":"exact","split":"smoke"}
+{"query_id":"ngx_05","query":"nginx 如何配置 HTTP/2 和 HTTP/3","gold":[187],"source":"nginx","category":"exact","split":"smoke"}
+{"query_id":"ngx_06","query":"nginx 如何把请求作为 API 网关转发","gold":[195,198,262,263],"source":"nginx","category":"semantic","split":"smoke"}
+{"query_id":"ngx_07","query":"nginx SAML 身份认证配置","gold":[133,144,151],"source":"nginx","category":"mixed","split":"smoke"}

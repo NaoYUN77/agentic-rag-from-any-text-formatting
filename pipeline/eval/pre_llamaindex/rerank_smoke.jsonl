@@ -1,0 +1,8 @@
+{"query_id":"r01","query":"什么是 keepalived","gold":[0,2]}
+{"query_id":"r02","query":"keepalived 如何实现故障转移","gold":[0,2,3,4]}
+{"query_id":"r03","query":"HAProxy 支持哪些负载均衡算法","gold":[1,6]}
+{"query_id":"r04","query":"virtual_ipaddress 在哪里配置","gold":[13,14,16]}
+{"query_id":"r05","query":"arptables 和 iptables 有什么区别","gold":[18,19,20,21]}
+{"query_id":"r06","query":"keepalived 版本不一致会有什么问题","gold":[3]}
+{"query_id":"r07","query":"VIP 是什么，故障时如何迁移","gold":[3,4,13,14]}
+{"query_id":"r08","query":"NAT 路由与直接路由有什么区别","gold":[8,9,16,18,21]}

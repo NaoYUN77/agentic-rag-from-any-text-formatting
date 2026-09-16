@@ -1,0 +1,10 @@
+requests>=2.31
+numpy>=1.26
+jieba>=0.42
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.8
+qdrant-client>=1.19
+langchain-core>=0.3
+langchain-experimental>=0.3
+llama-index-core>=0.14
