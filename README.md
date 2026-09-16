@@ -3,6 +3,10 @@
 > 面向多格式文档的 RAG 工程实践: 文档摄取、LlamaIndex 分块、Dense/Sparse 混合召回、RRF、Rerank、答案生成与引用。
 >
 > 仓库: <https://github.com/NaoYUN77/agentic-rag-from-any-text-formatting>
+>
+> 当前稳定版: `v0.0.1`。开发分支: `feature/phase0-ingest-structure`，对应 `v0.0.2` 的格式路由与 Block-aware chunking。
+>
+> 导航: [文档索引](docs/README.md) | [实现说明](pipeline/README.md) | [变更记录](CHANGELOG.md)
 
 ## 功能概览
 
@@ -10,6 +14,10 @@
 
 ```text
 PDF / Markdown 文档摄取
+URL / HTML 摄取 (Trafilatura + 代码块补强)
+基础格式路由器 (URL/HTML/Markdown/PDF/plain text)
+Raw Parse Quality Gate + Index Decision
+Block-aware Hierarchical ChunkBuilder (Parent/Leaf + fragments + overlap)
 固定长度 + overlap + 边界语义微调的 LlamaIndex NodeParser
 Dense 向量检索 (qwen3-vl-embedding, 1024 维)
 Sparse 检索 (jieba + BM25 + Qdrant sparse vector)
@@ -23,8 +31,8 @@ FastAPI 服务与 Web 检索界面
 规划中:
 
 ```text
-统一格式路由器: PDF / 扫描件 / HTML / Markdown / Office
-URL 正文提取与去噪
+完整格式路由器: Office / 图片 / 更细的 PDF 画像
+Docling 英文/数学 PDF 适配
 中文/英文 PDF 分流
 代码块保真
 数学公式 LaTeX 保真
@@ -54,11 +62,18 @@ URL / PDF / Scan / HTML / Markdown / Office
                     v
         Cleaning / Normalization
                     |
-                    v
-        LlamaIndex FixedSemanticNodeParser
+        +-----------+-----------+
+        |                       |
+        v                       v
+Block-aware Builder     LlamaIndex NodeParser
+  [Phase 0, CLI]          [current online]
+        |                       |
+        v                       v
+Parent / IndexReadyChunk      Chunk
+        |                       |
+        +-----------+-----------+
                     |
                     v
-                 Chunk
                     |
           +---------+---------+
           |                   |
@@ -77,7 +92,10 @@ URL / PDF / Scan / HTML / Markdown / Office
       Answer + Citations -> FastAPI / Web
 ```
 
-## 当前索引状态
+> 当前状态：在线服务仍使用旧的 `LlamaIndex FixedSemanticNodeParser`。Phase 0 的 `BlockAwareHierarchicalChunkBuilder` 已能生成 `ParentNode + IndexReadyChunk`，但尚未接入 Qdrant。
+
+
+## 当前在线索引状态（旧链路）
 
 ```text
 Chunker          LlamaIndex FixedSemanticNodeParser
@@ -118,12 +136,28 @@ $env:DASHSCOPE_API_KEY = "sk-..."
 
 页面: <http://127.0.0.1:8000/>
 
+格式路由预览:
+
+```powershell
+.\.venv_rag\Scripts\python.exe format_router_demo.py `
+    --url https://example.com/article `
+    --out-dir experiments/router_demo
+
+.\.venv_rag\Scripts\python.exe format_router_demo.py `
+    --file corpus/my_document.md `
+    --out-dir experiments/router_demo
+```
+
 ## 仓库结构
 
 ```text
-docs/       工程知识、理论说明和复习路线
-issues/     当前缺陷、根因和解决状态
-pipeline/   文档处理、检索、生成、服务和实验数据
+CHANGELOG.md  版本变更和阶段成果
+.github/      GitHub Actions 与仓库自动化
+docs/         工程知识、架构和复习路线
+docs/README.md 文档导航入口
+issues/       当前缺陷、根因和解决状态
+pipeline/     文档处理、检索、生成、服务和实验数据
+pipeline/README.md 实现层导航与运行入口
 ```
 
 ---
@@ -187,6 +221,8 @@ pipeline/    实现与数据  "代码在哪、环境在哪、数据在哪"
 | `retrieval_scoring_and_rrf.md` | 1016 行 | **打分与融合** | 词袋 / TF-IDF / BM25 / RRF / 混合检索 / 工程落地 | 公式推导 + `pipeline/experiments/16 17 19` |
 | `RAG_learn.md` | 454 行 | **入门索引** | 学习资源清单(10 个, 含 URL), 并指向工作区内部阅读路线 | 无 |
 | `RAG_review_route.md` | 668 行 | **复习路线** | Chunk/OpenAI 基线 / 今日状态 / 复习顺序 / 自测题 | `pipeline/experiments/01 ~ 25` |
+| `format_routing_and_cleaning_plan.md` | 规划文档 | **格式路由计划** | URL/HTML/PDF/扫描件/代码/公式/图片/OCR 质量门控 | 方案设计 |
+| `ingest_pipeline_progress.md` | 289 行 | **当前进度** | Phase 0 实现、验证数据、风险和下一步 | 代码 + 测试 + CLI 实测 |
 
 **推荐阅读顺序:**
 
@@ -199,6 +235,8 @@ pipeline/    实现与数据  "代码在哪、环境在哪、数据在哪"
 5. 想懂稀疏内部    -> sparse_retrieval_concepts.md
 6. 想懂打分与融合  -> retrieval_scoring_and_rrf.md
 7. 想用框架        -> semantic_chunking_notes.md 或 llamaindex_chunking_notes.md
+8. 规划多格式摄取  -> format_routing_and_cleaning_plan.md
+9. 查看当前进度    -> ingest_pipeline_progress.md
 ```
 
 ---
@@ -239,6 +277,9 @@ pipeline\
 ├── reranker.py              ★ RRF 候选 → gte-rerank-v2
 ├── ingest_markdown_corpus.py ★ 增量 Markdown → dense/sparse Qdrant
 ├── rebuild_llamaindex_corpus.py ★ LlamaIndex 全量重建 dense/sparse
+├── format_router_demo.py    ★ URL/文件 -> Block JSON CLI
+├── ingest/                  ★ 格式路由器与 parser adapters
+│   └── chunker.py           ★ Block-aware Hierarchical ChunkBuilder
 ├── semantic_chunker_demo.py  语义分块主程序
 ├── hybrid_chunk_demo.py      四种分块策略对比
 ├── window_sweep_demo.py      边界窗口宽度 sweep
@@ -349,45 +390,40 @@ $env:SPARSE_QUERY = "你自己的查询"
 
 ## 六、当前进度
 
+> 当前在线服务仍使用旧的 LlamaIndex chunks。
+> Phase 0 多格式摄取和 Block-aware chunking 已实现，但还没有接入 Qdrant。
+
 ### 已完成
 
 ```text
-✅ 分块策略          五种策略的原理 + 实测对比
-✅ 前置工作          格式路由 / MinerU 解析 / 清洗 / 中文句子切分
-✅ 嵌入机制          单句 vs 窗口 vs +metadata 的成本与效果
-✅ 断点判定          四种统计方法的实测
-✅ 框架落地          LangChain / LlamaIndex
-✅ 向量数据库        Qdrant 本地模式, 已落盘持久化
-✅ 检索闭环          清洗 → 分块 → 向量化 → 入库 → 检索  (rag_pipeline.py)
-✅ sparse 独立链路   PDF/Markdown/Qdrant chunk → jieba → BM25 → Qdrant sparse
-✅ Hybrid + RRF      dense + sparse 双路召回, 页面可切换三种模式
-✅ 生成 + 引用       hybrid top-k → qwen-turbo/qwen-plus → answer + citations
-✅ Rerank            RRF 候选 → gte-rerank-v2 → 最终 top-5
-✅ 多语料            Red Hat 42 + NGINX 312 = 354 LlamaIndex chunks
-✅ LlamaIndex 切分器 800 token + 400 overlap + 边界语义微调预览
-✅ 问题盘点          5 个具体问题已定位根因
-✅ 数据归档          原始输出 + 结论档案 + 复现命令
+[x] 多格式路由       URL / HTML / Markdown / PDF / plain text
+[x] 统一文档模型     DocumentArtifact / DocumentBlock / fragments
+[x] 质量门控         Raw Parse Quality Gate + Index Decision
+[x] Block 清理       heading / code / formula / table / image 感知
+[x] Block-aware 切块 ParentNode / IndexReadyChunk / overlap / token 上限
+[x] 在线检索链路     旧 LlamaIndex chunks -> Dense / Sparse / Qdrant / RRF / Rerank
+[x] 生成与引用       retrieval context -> Qwen answer + [C1] citations
+[x] 实验归档         原始输出 + findings + 复现命令
 ```
 
-### 尚未做
+### Phase 0 未闭环
 
 ```text
-❌ 内容分类           目录/版权/正文没分开处理(问题 01, P0)
-❌ 块粒度约束         只有上限没有下限(问题 02, P0)
-❌ 混合检索           只有稠密一路(问题 04, P1)
-❌ metadata 质量      section/page 不可靠(问题 05, P1)
-❌ 重排序             没有 cross-encoder(问题 03, P2)
-❌ Web 交互           计划用 FastAPI 暴露检索接口
-❌ 评估集             没有标注数据, 所有"哪个更好"都是代理指标推断
+[ ] Chunk 入库       IndexReadyChunk 还没有写入 Qdrant
+[ ] 语义边界         window_tokens 还没有接入 embedding 边界微调
+[ ] Parent expansion 检索 leaf 后返回 parent context
+[ ] 字段化 BM25F     heading 权重和正文权重还没有分离
+[ ] 固定评估集       qrels / recall@k / MRR / nDCG 尚未建立
+[ ] 扩展 Parser      动态网页 / Office / 图片 OCR / OCR confidence
 ```
 
-### 最该先补的
+### 推荐下一步
 
 ```text
-评估集 —— 它是所有"分块策略哪个更好"的前提。
-
-现在能算的指标(切点距离、块大小分布、嵌入成本)都是【代理指标】,
-能筛掉明显不合理的配置, 但不能回答"检索效果好不好"。
+1. 用新 ChunkBuilder 重跑现有全部语料，比较新旧 chunk 分布。
+2. 将 IndexReadyChunk 接入 dense / sparse / Qdrant，并复用同一个 chunk_id。
+3. 重建 qrels，分阶段评估 dense、sparse、RRF 和 rerank。
+4. 最后再把 embedding 语义边界微调并入 ChunkBuilder。
 ```
 
 ---

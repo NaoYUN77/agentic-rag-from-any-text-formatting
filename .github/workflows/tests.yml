@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches:
+      - main
+      - "feature/**"
+  pull_request:
+
+jobs:
+  phase0-tests:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: pipeline
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Install Phase 0 dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            llama-index-core \
+            trafilatura \
+            beautifulsoup4 \
+            markdownify \
+            lxml \
+            readability-lxml
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
