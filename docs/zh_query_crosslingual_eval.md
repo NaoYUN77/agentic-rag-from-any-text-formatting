@@ -173,3 +173,60 @@ pipeline/eval_zh_crosslingual.py    本次对照实验脚本
 pipeline/hybrid_retriever.py        检索器(dense_search / sparse_search / rrf_fuse)
 docs/phase0_loop_verification.md    Phase 0 闭环验证
 ```
+
+## 9. 附：本次遇到的 git 引用异常（环境问题，非代码问题）
+
+提交本次实验时触发了一个 git 异常，记录备查。
+
+### 现象
+
+```text
+fatal: your current branch 'feature/phase0-ingest-structure' does not have any commits yet
+```
+
+且提交日志显示为 `commit (initial):`，一次提交报出 96 files changed / 23941 insertions，
+本应只有 3 个文件。
+
+### 原因
+
+`.git/refs/heads/feature/phase0-ingest-structure` 这个**引用文件不存在**，
+而 `.git/HEAD` 仍指向它，构成 git 的 "unborn branch" 状态。
+
+因此新提交被当成 initial commit（无父提交），把整个工作区文件全部算进这次提交。
+
+**该引用文件在每次 git 操作后会被清理掉**，推测与目录所有权有关——
+本仓库存在 `dubious ownership` 问题（`.git` 属主为 `CodexSandboxOffline`，
+当前用户为 `l`）。
+
+### 处理
+
+1. 确认提交对象未丢失：`20434f8`（上一轮）与误提交对象都仍可通过 `git cat-file` 访问。
+2. 确认工作区文件完整，误提交与预期的差异**恰好等于本次要提交的 3 个文件**，无内容污染。
+3. 用 PowerShell（非 bash）重建引用目录并写入**完整** hash：
+
+```powershell
+$refFile = "E:\...\.git\refs\heads\feature\phase0-ingest-structure"
+New-Item -ItemType Directory -Path "...\.git\refs\heads\feature" -Force
+Set-Content -Path $refFile -Value "<完整40位hash>" -NoNewline
+```
+
+4. 重新提交，确认父提交正确：
+
+```text
+4e17853 parent=20434f8 feat: evaluate query-side cross-lingual retrieval strategies
+```
+
+### 要点
+
+- **必须写完整 40 位 hash**，写短 hash 不是合法 ref。
+- bash 下无法在 `.git/refs/` 下创建子目录（静默失败，退出码 1），
+  PowerShell 可以。这与安全沙箱对 `.git` 的保护有关。
+- 该环境下每次 git 操作后都要复查引用文件是否还在：
+
+```bash
+cat .git/refs/heads/feature/phase0-ingest-structure
+```
+
+- 提交后用 `git log --format="%h parent=%p"` 检查父链，
+  出现空 parent 说明又进入了 unborn branch 状态。
+
