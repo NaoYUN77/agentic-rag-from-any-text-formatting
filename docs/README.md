@@ -6,14 +6,19 @@
 
 | 文档 | 定位 |
 |---|---|
-| `format_routing_and_cleaning_plan.md` | 多格式摄取、格式路由、质量门控、Block 与 Chunk 的架构方案 |
+| `project_overview_for_agents.md` | **新 Agent 接手总览**：项目目标、架构、已实现、未实现、待新增、约束和代码地图 |
+| `plan_vs_implementation.md` | **规划与实现对照表**：逐条核对 `format_routing_and_cleaning_plan.md` 的设计点与代码实际状态，标注过时位置 |
+| `format_routing_and_cleaning_plan.md` | 多格式摄取、格式路由、质量门控、Block 与 Chunk 的架构方案（⚠️ 设计史料，第 1/2/3 章思想有效，实现细节见上表） |
 | `ingest_pipeline_progress.md` | 当前 Phase 0 实现状态、验证数据、未完成项和下一步 |
 | `block_aware_chunking_implementation.md` | 当前 Block -> Piece -> Chunk、overlap、fragments 和 Qdrant 入库实现说明 |
+| `phase0_loop_verification.md` | 语料扩充与 Phase 0 端到端功能闭环验证结论、踩坑记录 |
+| `zh_query_crosslingual_eval.md` | 中文 Query 跨语言检索方案对照实验（A/B/C 三方案） |
 
-## 2. Chunking
+## 2. Block 与 Chunking
 
 | 文档 | 定位 |
 |---|---|
+| `block_structure_and_blockification.md` | **Block 结构与 block 化全过程**：数据结构、7 种类型、Markdown→Block 状态机、section_path、cleaner 与质量门、实测数据、三个工程结论 |
 | `rag_chunking_concepts.md` | 通用分块原理、相似度与距离、断点判定、窗口机制 |
 | `chunking_strategy_guide.md` | 分块策略选型、成本与实验结论 |
 | `semantic_chunking_notes.md` | LangChain 语义切分专栏 |
@@ -25,7 +30,8 @@
 |---|---|
 | `sparse_vs_dense_retrieval.md` | 稀疏与稠密召回的共同概念 |
 | `sparse_retrieval_concepts.md` | 词项、词表、倒排索引、稀疏向量与 BM25 |
-| `retrieval_scoring_and_rrf.md` | TF-IDF、BM25、RRF、混合检索与打分 |
+| `retrieval_scoring_and_rrf.md` | 混合检索、多路召回、候选深度、RRF、加权融合、重排与评估 |
+| `top_k_and_candidate_depth.md` | Top-K、candidate_k、RRF k、rerank、context_k 与 Recall@k |
 
 ## 4. 学习与复习
 
@@ -43,9 +49,13 @@
   -> sparse_vs_dense_retrieval.md
 
 理解当前实现:
-  format_routing_and_cleaning_plan.md
+  block_structure_and_blockification.md
+  -> format_routing_and_cleaning_plan.md
   -> ingest_pipeline_progress.md
   -> pipeline/README.md
+
+辨析"规划 vs 实际"(架构对不上时先看这份):
+  plan_vs_implementation.md
 
 准备继续开发:
   ingest_pipeline_progress.md 的第 6、7 节

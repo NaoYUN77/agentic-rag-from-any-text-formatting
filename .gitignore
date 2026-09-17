@@ -43,6 +43,12 @@ pipeline/corpus/*.err
 
 # 服务日志
 pipeline/server.log
+pipeline/server.log.bak.*
+pipeline/server_phase0.log
+pipeline/server.err
+
+# Agent 工作区(本地记忆与临时状态, 不进入仓库)
+.workbuddy-ai/
 pipeline/server.err
 
 # 与本项目无关的嵌套仓库

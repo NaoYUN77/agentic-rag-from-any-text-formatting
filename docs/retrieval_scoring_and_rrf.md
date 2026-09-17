@@ -1,1016 +1,1123 @@
-# 检索打分与 RRF 融合: 从词袋、TF-IDF、BM25 到混合检索
+# 混合检索与 RRF: 多路召回、候选深度、融合与重排
 
-> 本文聚焦打分与融合:
+> 本文只讨论混合检索本身。
 >
-> ```text
-> 表示与打分: 词袋 / TF-IDF / BM25
-> 融合算法: RRF(倒数排名融合)
-> 精排算法: cross-encoder rerank
-> ```
+> Sparse 通道内部原理见:
+> - `sparse_retrieval_concepts.md`
 >
-> 文中的 RRF 是标准写法, 不是 RFF。
+> Dense 与 Sparse 的系统差异见:
+> - `sparse_vs_dense_retrieval.md`
 >
-> dense 和 sparse 属于共用检索概念, 已独立到:
->
-> ```text
-> sparse_vs_dense_retrieval.md
-> ```
->
-> 关联内容:
-> - 当前通道问题: `../issues/04_channel_layer.md`
-> - 通道对照实验脚本: `../pipeline/retrieval_channel_compare.py`
-> - 检索实现: `../pipeline/rag_pipeline.py`
-> - 通用 RAG 概念: `rag_chunking_concepts.md`
+> Top-K、candidate_k、rerank_candidate_k、context_k 见:
+> - `top_k_and_candidate_depth.md`
 
 ---
 
-## 一、先给全链路定位
+## 一、先明确混合检索不是什么
 
-RAG 检索可以拆成四层。每一层解决的问题不同, 不能互相替代:
-
-```text
-query
-  |
-  +-- 稀疏通道: BM25 / TF-IDF / SPLADE -------- top-N1
-  |
-  +-- 稠密通道: BGE / Qwen embedding ---------- top-N2
-                |
-                v
-          RRF 等排名融合 ---------------------- top-K
-                |
-                v
-          cross-encoder 重排序 ---------------- top-k_final
-                |
-                v
-               送给 LLM
-```
-
-对应关系:
+混合检索不是：
 
 ```text
-词袋、TF-IDF、BM25   负责"字面出现了什么"
-BGE、Qwen embedding  负责"语义大概是什么"
-RRF                   负责"如何合并多个候选排名"
-rerank                负责"把少量候选精排一次"
+dense_score + sparse_score
 ```
 
-最常见误区是把这些词都叫成"向量模型"。严格来说:
+也不是：
 
-- BM25 是**检索打分算法**, 不是 embedding 模型。
-- BGE 是**embedding 模型家族**, 不是融合算法。
-- RRF 是**排名融合算法**, 本身不做文本表示。
-- rerank 是**二次排序阶段**, 通常使用 cross-encoder, 不是召回器。
+```text
+把两个向量数据库拼起来
+```
+
+更不是：
+
+```text
+某个算法本身
+```
+
+混合检索是一个工程架构：
+
+```text
+同一查询
+-> 进入多个独立召回通道
+-> 每个通道产生自己的候选和排名
+-> 在候选层做融合
+-> 可选重排
+-> 得到最终结果
+```
+
+BM25 可以是 sparse 通道的一种实现，但 BM25 不等于混合检索。
 
 ---
 
-## 二、词袋模型(Bag of Words, BoW)
+## 二、核心术语
 
-### 2.1 它解决什么问题
+### 2.1 Retrieval Channel
 
-把一篇文本变成固定词表上的计数向量, 让计算机可以先做最基础的字面检索和分类。
-
-### 2.2 定义
-
-假设语料词表有 `V` 个词:
+一条独立的召回通道必须具备：
 
 ```text
-V = {w1, w2, w3, ..., wV}
+自己的文本表示
+自己的索引
+自己的相似度或打分方式
+自己的排序结果
 ```
 
-文档 `d` 的词袋向量:
+例如：
 
 ```text
-v_d = [c(w1, d), c(w2, d), ..., c(wV, d)]
+Dense channel
+Sparse channel
+Metadata channel
+Graph channel
+Rule channel
 ```
 
-其中:
+通道不是数据库类型。
+
+一个向量数据库可以承载多种通道。
+
+一个进程也可以同时运行多个通道。
+
+### 2.2 Candidate
+
+候选是：
 
 ```text
-c(w, d) = 词 w 在文档 d 中出现的次数
+某条 query 在某条通道中召回出来的文档或 chunk
 ```
 
-例如:
+候选通常带有：
 
 ```text
-词表 = [keepalived, haproxy, 负载, 平衡]
-
-文档 A = "keepalived 负载 平衡"
-v_A   = [1, 0, 1, 1]
-
-文档 B = "haproxy 负载 平衡"
-v_B   = [0, 1, 1, 1]
+point_id / chunk_id
+channel_name
+rank
+score
+payload
 ```
 
-### 2.3 作用
+### 2.3 Rank
 
-- 把变长文本表示为固定长度向量。
-- 保留"某个词出现过多少次"。
-- 计算简单, 可解释, 不需要 GPU。
-
-### 2.4 问题
+Rank 是候选在该通道中的名次：
 
 ```text
-1. 丢掉词序
-   "狗咬人" 和 "人咬狗" 的词袋几乎一样。
+rank = 1
+    排名第一
 
-2. 没有同义能力
-   "汽车" 和 "automobile" 是两个不同维度。
-
-3. 常见词和稀有词权重一样
-   "的" 和 "VRRP" 都只是一个词, 但重要性完全不同。
-
-4. 词表维度很大
-   中文词表可能几十万维, 但每篇文档只有很少的非零值。
+rank = 2
+    排名第二
 ```
 
-正因为第 3 个问题, 才发展出了 TF-IDF。
+Rank 和 score 不同：
+
+```text
+score
+    原始打分或相似度
+
+rank
+    在一条通道内部排序后的位置
+```
+
+### 2.4 Fusion
+
+Fusion 是：
+
+```text
+把多条通道的候选排名合并成一个统一排名
+```
+
+### 2.5 Reranker
+
+Reranker 是：
+
+```text
+对已经召回的候选做更昂贵的精排
+```
+
+Reranker 不负责从全库召回。
+
+它只能重排已经进入候选池的文档。
 
 ---
 
-## 三、TF-IDF
+## 三、为什么需要混合检索
 
-TF-IDF 是两个统计量的乘积:
+单一检索通道常有固定失效模式。
 
-```text
-TF-IDF(t, d) = TF(t, d) * IDF(t)
-```
-
-### 3.1 TF: Term Frequency, 词频
-
-它衡量一个词在当前文档中出现得有多频繁。
-
-常见定义:
+Dense 通道擅长：
 
 ```text
-原始词频:
-TF(t, d) = f(t, d)
-
-归一化词频:
-TF(t, d) = f(t, d) / |d|
-
-对数词频:
-TF(t, d) = 1 + log(f(t, d))
+语义相似
+同义改写
+自然语言问句
+跨语言语义
 ```
 
-其中:
+Dense 通道容易漏掉：
 
 ```text
-f(t, d) = 词 t 在文档 d 中的次数
-|d|     = 文档 d 的词数
+精确编号
+罕见字符串
+配置项
+错误码
+版本号
 ```
 
-### 3.2 IDF: Inverse Document Frequency, 逆文档频率
-
-它衡量一个词在整个语料中有多稀有。
-
-常见定义:
+Sparse 通道擅长：
 
 ```text
-IDF(t) = log(N / df(t))
+精确词项匹配
+领域术语
+专有名词
+配置项
+错误码
 ```
 
-或加平滑:
-
-```text
-IDF(t) = log((N + 1) / (df(t) + 1)) + 1
-```
-
-其中:
-
-```text
-N       = 文档总数
-df(t)   = 包含词 t 的文档数
-```
-
-直觉:
-
-```text
-"的" 出现在几乎所有文档中 -> df 很大 -> IDF 很小
-"VRRP" 只出现在少数文档中 -> df 很小 -> IDF 很大
-```
-
-### 3.3 查询打分
-
-查询 `q` 与文档 `d` 的 TF-IDF 分数:
-
-```text
-score(q, d) = Σ_{t ∈ q} TF-IDF(t, d)
-```
-
-如果查询词也在查询中重复, 还可以乘查询词频 `qtf(t, q)`:
-
-```text
-score(q, d) = Σ_{t ∈ q} qtf(t, q) * TF-IDF(t, d)
-```
-
-### 3.4 作用与局限
-
-作用:
-
-- 稀有词获得更高权重。
-- 比纯词袋更能反映关键词重要性。
-- 是 BM25 的历史前身。
-
-局限:
-
-```text
-1. 词频线性增长
-   一个词从出现 1 次变成 10 次, 权重可能一直线性上涨。
-
-2. 文档长度处理粗糙
-   长文档天然更容易包含更多词。
-
-3. 没有词频饱和
-   关键词出现 100 次不应该比出现 10 次重要 10 倍。
-```
-
-BM25 主要是针对这些问题做的改进。
-
----
-
-## 四、BM25
-
-BM25 全称通常是 Okapi BM25, 是概率检索模型中的经典排序函数。它在 TF-IDF 的基础上加入:
-
-```text
-1. 词频饱和
-2. 文档长度归一化
-3. 更好的稀有词权重形式
-```
-
-### 4.1 公式
-
-查询 `q` 对文档 `d` 的 BM25 分数:
-
-```text
-score_BM25(q, d)
-= Σ_{t ∈ q}
-    IDF(t)
-    *
-    f(t, d) * (k1 + 1)
-    -----------------------------------------
-    f(t, d) + k1 * (1 - b + b * |d| / avgdl)
-```
-
-其中:
-
-```text
-q        查询
-d        文档或 chunk
-t        查询中的一个词
-f(t, d)  词 t 在文档 d 中的出现次数
-|d|      文档 d 的长度
-avgdl    语料中所有文档的平均长度
-
-k1       词频饱和参数, 常见 1.2 ~ 2.0
-b        文档长度归一化强度, 常见 0.75
-```
-
-本项目的实现使用:
-
-```text
-k1 = 1.2
-b  = 0.75
-```
-
-代码位置:
-
-```text
-../pipeline/retrieval_channel_compare.py
-```
-
-该实现使用的 IDF 形式是:
-
-```text
-IDF(t) = ln(1 + (N - df(t) + 0.5) / (df(t) + 0.5))
-```
-
-不同搜索引擎可能使用略有差异的 IDF 平滑形式, 但核心思想相同。
-
-### 4.2 逐项解析
-
-#### `f(t, d) * (k1 + 1)`
-
-词频越高, 分子越大。
-
-#### 分母中的 `f(t, d) + k1 * (...)`
-
-当词频增加时, 分数不是无限线性增长, 而是逐渐饱和。
-
-```text
-出现 1 次  -> 重要性快速上升
-出现 5 次  -> 增幅开始变小
-出现 50 次 -> 再增加很多次的边际收益很低
-```
-
-这就是**词频饱和**。
-
-#### `|d| / avgdl`
-
-长文档通常更容易命中查询词。BM25 用长度归一化降低这种天然优势。
-
-#### `b = 0`
-
-不做文档长度归一化。
-
-#### `b = 1`
-
-完全使用文档长度归一化。
-
-#### `k1`
-
-控制 TF 的饱和速度:
-
-```text
-k1 较小 -> 更快饱和
-k1 较大 -> 词频继续增长的空间更大
-```
-
-### 4.3 一个简化的直觉例子
-
-假设两个文档都包含 `keepalived`:
-
-```text
-文档 A: 长度正常, keepalived 出现 1 次
-文档 B: 长度超长, keepalived 出现 10 次
-```
-
-TF-IDF 可能认为 B 因词频高而明显占优。BM25 会同时考虑:
-
-```text
-B 的 keepalived 词频虽然高, 但已经饱和;
-B 的文档长度很长, 需要受到长度惩罚。
-```
-
-因此 BM25 通常比原始 TF-IDF 更稳。
-
-### 4.4 BM25 的作用
-
-BM25 擅长:
-
-```text
-产品型号           TS-999
-配置项名           virtual_ipaddress
-文件名             keepalived.conf
-错误码             HTTP 502
-函数名             SentenceWindowNodeParser
-版本号和章节号      v2.4.1 / 第 3.2 节
-用户直接粘贴的短语  "invalid ip number count"
-```
-
-BM25 不擅长:
+Sparse 通道容易漏掉：
 
 ```text
 同义表达
-    "主节点挂掉后自动切换"
-    vs
-    "故障转移"
-
-跨语言表达
-    "负载均衡"
-    vs
-    "load balancing"
-
-多义词消歧
-    "Apple 公司" vs "Apple 水果"
-
-长距离语义关系
-    查询讲的是机制, 文档用完全不同的词解释同一个机制
+语义改写
+上下文依赖表达
 ```
 
-### 4.5 BM25 与中文分词
-
-中文文档不能天然按空格切词。BM25 之前通常要先分词。
+混合检索的价值来自：
 
 ```text
-原文:
-    keepalived 使用 VRRP 发送通告
-
-分词:
-    ["keepalived", "使用", "VRRP", "发送", "通告"]
+两条通道的误差不完全相关
 ```
 
-常见选择:
+如果两个通道总是召回同一批文档：
 
 ```text
-jieba          简单、便宜、适合 Demo
-Lucene 分词器    搜索引擎常用
-行业词典        对产品名和专有名词很重要
+混合收益很低
 ```
 
-分词错误会直接影响 BM25:
+如果两路擅长不同问题：
 
 ```text
-错误切分 -> 查询词和文档词对不上 -> 明明文档里有, BM25 却匹配不到
-```
-
-### 4.6 BM25 变体
-
-常见变体包括:
-
-```text
-BM25+      给每个匹配词增加下限项, 避免过长文档里的匹配被过度惩罚
-BM25F      处理标题、正文、锚文本等不同字段
-BM25L      调整长度归一化
-```
-
-实际工程里不需要一开始就换复杂变体, 标准 BM25 通常已经能提供明显的字面召回能力。
-
----
-
-## 五、共用概念: 稀疏召回与稠密召回
-
-dense 和 sparse 是两条通用的检索范式, 不属于 RRF, 也不属于某个框架。它们的完整原理统一维护在:
-
-```text
-sparse_vs_dense_retrieval.md
-```
-
-只在本文保留定位:
-
-```text
-稀疏召回   BM25 / TF-IDF / SPLADE     强在字面、编号、配置项
-稠密召回   BGE / Qwen embedding       强在同义、改写、语义
-```
-
-本文后续只讨论一个独立问题:
-
-```text
-两路召回已经产生排名之后, 如何把排名融合成最终结果?
-```
-
-答案就是 RRF, 以及它前后的候选深度、rerank 和工程约束。
-
----
-
-## 六、混合检索(Hybrid Retrieval)
-
-### 6.1 基本结构
-
-```text
-query
-  |
-  +-- dense channel ------> top-20
-  |
-  +-- sparse channel -----> top-20
-              |
-              v
-      RRF / 加权融合 ------> top-10
-              |
-              v
-        rerank -----------> top-5
-```
-
-### 6.2 为什么要两路
-
-假设查询是:
-
-```text
-"keepalived.conf 里 virtual_ipaddress 怎么配"
-```
-
-稠密通道可能召回:
-
-```text
-"Keepalived 的虚拟 IP 地址配置..."
-```
-
-稀疏通道更可能精确命中:
-
-```text
-"virtual_ipaddress"
-"keepalived.conf"
-```
-
-两路各有一个正确答案的不同侧面。融合的目的是让两个信号都参与最终排序。
-
-### 6.3 候选深度
-
-常见做法是:
-
-```text
-每路先取 20 ~ 100
-融合后取 10 ~ 50
-rerank 后取 5 ~ 10
-```
-
-不要一开始只取 top-3 再融合。这样会把某一路本来在 top-8、但融合后可以进入 top-3 的文档提前丢掉。
-
----
-
-## 七、RRF: Reciprocal Rank Fusion
-
-RRF 的中文是**倒数排名融合**。它的目标是: 不比较不同检索器的原始分数, 只根据文档在各路结果里的排名来合并名次。
-
-### 7.1 为什么需要排名融合
-
-向量检索返回:
-
-```text
-cosine similarity = 0.83
-```
-
-BM25 返回:
-
-```text
-BM25 score = 18.72
-```
-
-这两个数不能直接相加:
-
-```text
-0.83 + 18.72 没有意义
-```
-
-即使做 min-max 归一化, 也会受当前候选集合、异常分数和分布影响。RRF 的解决方式是:
-
-```text
-不关心分数是多少
-只关心文档在第 1 路排第几、第 2 路排第几
-```
-
-### 7.2 `rank_i(d)` 是什么
-
-公式:
-
-```text
-rank_i(d)
-```
-
-它表示:
-
-```text
-文档 d 在第 i 条检索通道结果中的名次
-```
-
-它是一个函数, 不是乘法。
-
-假设:
-
-```text
-dense 结果:
-    1. A
-    2. B
-    3. C
-
-BM25 结果:
-    1. B
-    2. C
-    3. A
-```
-
-那么:
-
-```text
-rank_dense(A) = 1
-rank_dense(B) = 2
-rank_dense(C) = 3
-
-rank_bm25(A) = 3
-rank_bm25(B) = 1
-rank_bm25(C) = 2
-```
-
-形式化定义:
-
-```text
-如果第 i 路排名列表 L_i 的第 j 个元素是 d:
-    rank_i(d) = j
-
-如果 d 没有出现在第 i 路列表里:
-    rank_i(d) = ∞
-```
-
-名次通常从 `1` 开始计数, 不是从 `0`。
-
-### 7.3 RRF 标准公式
-
-```text
-RRF(d) = Σ_i 1 / (k + rank_i(d))
-```
-
-其中:
-
-```text
-i          第 i 条检索通道
-d          候选文档或 chunk
-rank_i(d)  文档 d 在第 i 路结果中的名次
-k          平滑常数, 常见默认值是 60
-```
-
-如果文档没有出现在某一路:
-
-```text
-1 / (k + ∞) = 0
-```
-
-实际实现里通常直接不对该路累加。
-
-### 7.4 RRF 计算例子
-
-假设:
-
-```text
-dense 排名:
-    1. A
-    2. B
-    3. C
-    4. D
-
-BM25 排名:
-    1. B
-    2. C
-    3. A
-```
-
-取 `k = 60`。
-
-#### A
-
-```text
-A = 1 / (60 + rank_dense(A)) + 1 / (60 + rank_bm25(A))
-  = 1 / (60 + 1) + 1 / (60 + 3)
-  = 1 / 61 + 1 / 63
-  = 0.032266
-```
-
-#### B
-
-```text
-B = 1 / (60 + 2) + 1 / (60 + 1)
-  = 1 / 62 + 1 / 61
-  = 0.032522
-```
-
-#### C
-
-```text
-C = 1 / (60 + 3) + 1 / (60 + 2)
-  = 1 / 63 + 1 / 62
-  = 0.032002
-```
-
-#### D
-
-```text
-D = 1 / (60 + 4) + 0
-  = 1 / 64
-  = 0.015625
-```
-
-最终顺序:
-
-```text
-1. B
-2. A
-3. C
-4. D
-```
-
-B 虽然没有同时在两路排第一, 但它在两路都很靠前, 因此 RRF 认为它更稳定。
-
-### 7.5 `k` 的作用
-
-`k` 不是 top-k, 也不是取前 k 条。
-
-它控制高排名的优势有多强:
-
-```text
-k = 0
-    rank 1 -> 1
-    rank 2 -> 0.5
-    第 1 名优势非常大
-
-k = 60
-    rank 1 -> 1 / 61 = 0.016393
-    rank 2 -> 1 / 62 = 0.016129
-    第 1 名和平名次差距被压平
-```
-
-`k` 越大:
-
-```text
-不同排名之间的差异被压缩
-融合更平滑
-单个检索器更难靠一个第 1 名压过其他通道的共识
-```
-
-RRF 原始论文常用的默认值是:
-
-```text
-k = 60
-```
-
-但这不是固定物理常数。实际系统应该根据评估集和候选深度调整。
-
-### 7.6 加权 RRF
-
-如果某个通道更可信, 可以给通道加权重:
-
-```text
-RRF_weighted(d) = Σ_i w_i / (k + rank_i(d))
-```
-
-其中:
-
-```text
-w_i = 第 i 条通道的权重
-```
-
-例如:
-
-```text
-dense 权重 1.0
-BM25  权重 0.8
-```
-
-权重不能凭感觉长期固定, 应该用评估集验证。否则容易变成"把参数当结论"。
-
-### 7.7 RRF 伪代码
-
-```python
-def rrf(rank_lists, k=60):
-    scores = {}
-
-    for ranked_docs in rank_lists:
-        for rank, doc_id in enumerate(ranked_docs, start=1):
-            scores[doc_id] = scores.get(doc_id, 0.0)
-            scores[doc_id] += 1.0 / (k + rank)
-
-    return sorted(scores, key=scores.get, reverse=True)
-```
-
-调用:
-
-```python
-dense_top20 = dense_search(query, limit=20)
-sparse_top20 = bm25_search(query, limit=20)
-
-fused = rrf(
-    [dense_top20, sparse_top20],
-    k=60,
-)
-
-final_top10 = fused[:10]
-```
-
-### 7.8 RRF 的优点
-
-```text
-1. 不需要不同通道的分数可比
-2. 不需要训练一个融合模型
-3. 对异常分数不敏感
-4. 实现简单, 容易调试
-5. 对异构检索器很通用
-```
-
-### 7.9 RRF 的局限
-
-```text
-1. 丢掉了原始分数强度
-   一个 0.99 的向量分数和一个 0.60 的向量分数,
-   如果排名只差一位, RRF 基本看不出差异。
-
-2. 不能修复错误候选
-   如果 BM25 和 dense 都没有召回正确 chunk, RRF 不可能把它变出来。
-
-3. 不负责分块质量
-   如果 chunk 本身混合了多个主题, RRF 只会把错误 chunk 排得更稳定。
-
-4. 融合权重仍然需要评估
-   两路并不总是一样可靠。
-
-5. 候选深度会影响结果
-   只融合每路 top-3 和融合 top-50, 结果可能完全不同。
-```
-
-最重要的一点:
-
-```text
-RRF 是排序融合器, 不是万能纠错器。
-它只能在已经召回出来的候选里重新组合优势。
+混合可能显著提高 Recall
 ```
 
 ---
 
-## 八、RRF、BM25、BGE、Qdrant 的关系
+## 四、Sparse 通道不等于 BM25
+
+Sparse 描述的是表示方式：
 
 ```text
-文本
-  |
-  +-- BM25 / TF-IDF  ---------> 稀疏相关性分数
-  |
-  +-- BGE / Qwen embedding ---> 稠密向量
-                                  |
-                                  v
-                             Qdrant 等向量库
-                                  |
-                                  v
-                              dense 排名
-                                  |
-BM25 排名 ------------------------+
-                                  |
-                                  v
-                                RRF
-                                  |
-                                  v
-                             融合后排名
-                                  |
-                                  v
-                              cross-encoder
-                                  |
-                                  v
-                             最终 top-k
+高维
+大部分维度为 0
+非零维度通常对应词项或学习出来的稀疏特征
 ```
 
-一句话:
+Sparse 通道可以有多种实现：
 
 ```text
-Qdrant 负责存向量和做向量检索。
-BM25 负责字面检索。
-BGE/Qwen 负责把文本变成向量。
-RRF 负责把多个排名列表合成一个排名列表。
-Rerank 负责对少量候选做更贵、更准的精排。
-```
-
-### 关于“BGE 和 BM25 哪个更好”
-
-这个问题本身就是错的。它们擅长不同信号:
-
-```text
-BM25 会问: 查询词是否字面出现在文档里?
-BGE  会问: 文档整体语义是否接近查询?
-```
-
-生产系统通常不是二选一, 而是:
-
-```text
-BM25 + dense embedding + RRF + rerank
-```
-
----
-
-## 九、当前项目应该怎么落地
-
-当前工程已经落地 dense + sparse + RRF:
-
-```text
-query
-  |
-  +-- Qdrant redhat dense ------> cosine top-20
-  |
-  +-- Qdrant redhat_sparse -----> BM25 top-20
-              |
-              v
-          RRF(k=60)
-              |
-              v
-        gte-rerank-v2
-              |
-              v
-          最终 top-5
-```
-
-实现位于:
-
-```text
-../pipeline/hybrid_retriever.py
-../pipeline/rag_server.py
-../pipeline/static/index.html
-```
-
-API 和页面支持:
-
-```text
-mode=hybrid   两路召回 + RRF
-mode=dense    只看稠密向量
-mode=sparse   只看 BM25 sparse
-```
-
-原始验证输出和页面截图:
-
-```text
-../pipeline/experiments/16_hybrid_rrf.txt
-../pipeline/experiments/16_hybrid_ui.png
-../pipeline/experiments/16_hybrid_ui_mobile.png
-```
-
-生成阶段也已接入:
-
-```text
-../pipeline/generation.py
-POST /api/answer
-hybrid top-k -> qwen-turbo/qwen-plus -> answer + [C1] citations
-```
-
-生成实验见 `../pipeline/experiments/17_generation.txt`。
-rerank 实验见 `../pipeline/experiments/19_rerank_compare.txt`。
-
-问题记录在:
-
-```text
-../issues/04_channel_layer.md
-```
-
-下一阶段链路:
-
-```text
-query
-  |
-  +-- Qdrant dense ------> top-20
-  |
-  +-- BM25 -------------> top-20
-              |
-              v
-             RRF
-              |
-              v
-          top-10
-              |
-              v
-        rerank
-              |
-              v
-          top-5
-```
-
-### 9.1 先做最小可用版本
-
-```text
-1. 复用当前已经生成的 chunk 文本
-2. 对 chunk 文本做中文分词
-3. 建立内存 BM25 索引
-4. 每路各取 top-20
-5. 用 k=60 的 RRF 融合
-6. 在线检索接口返回两路排名和融合排名
-7. 建评估集后再调整权重和 k
-```
-
-### 9.2 需要落地的评估指标
-
-没有评估集时, 只能看代理指标。真正应记录的是:
-
-```text
-Recall@k      正确 chunk 是否出现在前 k 条
-MRR           正确 chunk 的平均倒数排名
-Precision@k   前 k 条里有多少是真正相关
-nDCG@k        相关性有多好, 且位置越靠前收益越大
-```
-
-### 9.3 先别做的事
-
-```text
-不要在还没有评估集时:
-    - 固定宣称 BM25 权重必须是某个值
-    - 固定宣称 RRF 一定优于分数融合
-    - 用几个 query 的结果代表整体检索质量
-    - 把"看起来更相关"当成真实指标
-```
-
----
-
-## 十、最后一页速记
-
-```text
-BoW
-    文档 = 词频表
-    只数词, 丢词序
-
-TF-IDF
-    词的重要性 = 词频 * 逆文档频率
-    稀有词权重更高
-
 BM25
-    TF-IDF 的工程改进版
-    加词频饱和 + 文档长度归一化
-    强项: 精确词、配置项、错误码、文件名
+TF-IDF
+SPLADE
+BGE-M3 sparse
+其他 learned sparse
+```
 
-Dense embedding
-    文本 -> 固定长度向量
-    强项: 同义词、语义表达、自然语言问题
+因此本文后面统一写：
 
-Cosine similarity
-    检索排序看相似度, 越大越好
+```text
+sparse channel
+```
 
-Cosine distance
-    语义分块看距离, 越大越可能是边界
+而不是：
+
+```text
+BM25 channel
+```
+
+BM25 的公式、词表和倒排索引细节放在 sparse 专题文档里。
+
+---
+
+## 五、Dense 通道不等于向量数据库
+
+Dense 通道至少包含：
+
+```text
+embedding 模型
+文本向量化
+向量相似度
+候选召回
+```
+
+向量数据库只负责：
+
+```text
+存储向量
+建立 ANN 索引
+执行相似度搜索
+返回候选
+```
+
+所以：
+
+```text
+Dense channel
+    = embedding model + vector search
+
+Vector DB
+    = 向量存储与检索基础设施
+```
+
+Qdrant、FAISS、Milvus 都没有替用户产生语义 embedding。
+
+---
+
+## 六、典型混合架构
+
+### 6.1 并行召回
+
+最常用：
+
+```text
+                    query
+                      |
+          +-----------+-----------+
+          |                       |
+          v                       v
+     Channel A               Channel B
+      top-N1                  top-N2
+          |                       |
+          +-----------+-----------+
+                      |
+                      v
+                 candidate pool
+                      |
+                      v
+                    fusion
+                      |
+                      v
+                   reranker
+                      |
+                      v
+                 final top-k
+```
+
+特点：
+
+```text
+各通道独立
+可以并行执行
+融合只发生在候选层
+```
+
+### 6.2 串行级联
+
+例如：
+
+```text
+rule / metadata filter
+-> dense recall
+-> sparse recall
+-> fusion
+-> rerank
+```
+
+特点：
+
+```text
+前面的步骤缩小搜索空间
+后面的步骤提高精度
+```
+
+缺点：
+
+```text
+早期过滤错误无法被后续步骤恢复
+```
+
+### 6.3 混合多级架构
+
+实际系统通常是多级组合：
+
+```text
+query understanding
+-> filters
+-> parallel recall
+-> fusion
+-> rerank
+-> final selection
+-> context construction
+```
+
+---
+
+## 七、候选池
+
+### 7.1 候选池从哪里来
+
+候选池可以是：
+
+```text
+union
+    两路候选取并集
+
+intersection
+    两路候选取交集
+
+quota
+    每路保留固定数量
+
+weighted
+    按通道权重分配候选预算
+```
+
+默认最常用：
+
+```text
+union
+```
+
+因为：
+
+```text
+交集会直接丢掉单路独有的结果
+```
+
+### 7.2 候选池的去重
+
+同一文档可能同时出现在：
+
+```text
+dense channel
+sparse channel
+metadata channel
+```
+
+融合前必须统一身份：
+
+```text
+chunk_id
+point_id
+document_id
+```
+
+否则同一内容会被当作不同候选。
+
+推荐：
+
+```text
+所有通道使用同一个 chunk_id
+```
+
+---
+
+## 八、分数不可比问题
+
+Dense 分数可能来自：
+
+```text
+cosine similarity
+dot product
+L2 distance
+```
+
+Sparse 分数可能来自：
+
+```text
+未归一化 BM25
+归一化后的词项权重
+学习型稀疏打分
+```
+
+因此：
+
+```text
+dense_score 和 sparse_score 通常不在同一尺度
+```
+
+例如：
+
+```text
+dense_score = 0.82
+sparse_score = 12.7
+```
+
+不能说：
+
+```text
+0.82 + 12.7
+```
+
+而应该：
+
+```text
+先分别排序
+再基于 rank 融合
+```
+
+RRF 的核心价值就在这里。
+
+---
+
+## 九、RRF 的概念
+
+RRF 全称：
+
+```text
+Reciprocal Rank Fusion
+倒数排名融合
+```
+
+它使用名次，不使用原始 score。
+
+### 9.1 基本公式
+
+对文档 `d`：
+
+```text
+RRF_score(d) = sum_i( 1 / (k + rank_i(d)) )
+```
+
+其中：
+
+```text
+i
+    第 i 条召回通道
+
+rank_i(d)
+    文档 d 在第 i 条通道中的名次
+
+k
+    RRF 平滑常数
+```
+
+如果文档没有出现在某条通道：
+
+```text
+rank_i(d) 不存在
+该通道对它的贡献为 0
+```
+
+### 9.2 k 的作用
+
+典型值：
+
+```text
+k = 60
+```
+
+`k` 越大：
+
+```text
+排名差值被压平
+不同名次之间差距变小
+```
+
+`k` 越小：
+
+```text
+前几名优势更明显
+```
+
+`k` 不是 Top-K。
+
+```text
+rrf_k
+    公式平滑常数
+
+top_k
+    保留多少条
+```
+
+### 9.3 RRF 的优点
+
+- 不需要跨通道归一化 score
+- 对异常分数不敏感
+- 对通道数量扩展友好
+- 实现简单
+- 适合并行召回
+
+### 9.4 RRF 的局限
+
+- 丢掉原始 score 的幅度信息
+- 通道质量差时也会被平等计入
+- 通道强相关时收益有限
+- k 和权重仍需评估
+- 不能代替 Reranker
+
+---
+
+## 十、加权 RRF
+
+不同通道通常可信度不同。
+
+可以加入通道权重：
+
+```text
+RRF_score(d) = sum_i( w_i / (k + rank_i(d)) )
+```
+
+其中：
+
+```text
+w_i
+    第 i 条通道的权重
+```
+
+例如：
+
+```text
+dense_weight  = 1.0
+sparse_weight = 0.6
+```
+
+需要注意：
+
+```text
+权重乘在 RRF 贡献上
+不是直接乘原始 score
+```
+
+常见情况：
+
+```text
+某个通道离线评估更好
+-> 提高权重
+
+某个通道在特定领域不可靠
+-> 降低权重
+
+某个通道只作为补充
+-> 保持较小权重
+```
+
+---
+
+## 十一、RRF 计算例子
+
+假设：
+
+```text
+Dense ranks:
+    1 A
+    2 B
+    3 C
+    4 D
+
+Sparse ranks:
+    1 C
+    2 A
+    3 E
+    4 F
+
+k = 60
+```
+
+计算：
+
+```text
+A:
+    dense  rank 1 -> 1/61
+    sparse rank 2 -> 1/62
+    total > B
+
+B:
+    dense  rank 2 -> 1/62
+    sparse absent -> 0
+
+C:
+    dense  rank 3 -> 1/63
+    sparse rank 1 -> 1/61
+
+E:
+    dense  absent -> 0
+    sparse rank 3 -> 1/63
+```
+
+可以看到：
+
+```text
+同一个文档在两路都靠前时，RRF 会得到更高分
+只在一个通道出现的文档，也能保留贡献
+```
+
+---
+
+## 十二、候选深度
+
+候选深度决定：
+
+```text
+在融合之前，每条通道保留多少候选
+```
+
+例如：
+
+```text
+dense_top_k  = 50
+sparse_top_k = 50
+```
+
+或者：
+
+```text
+candidate_k = 50
+```
+
+含义可能是：
+
+```text
+每路各取 50
+```
+
+候选深度越大：
+
+```text
+召回率可能提高
+后续融合和重排成本增加
+```
+
+候选深度太小：
+
+```text
+正确文档可能在融合前就被截掉
+```
+
+核心原则：
+
+```text
+candidate_k 通常应大于 final_top_k
+```
+
+如果正确文档没有进入候选池：
+
+```text
+RRF 无法把它找回
+Reranker 无法给它重新排序
+```
+
+---
+
+## 十三、Reranker 在混合检索中的位置
+
+典型顺序：
+
+```text
+Channel A top-N
+Channel B top-N
+-> fusion
+-> candidate pool
+-> reranker
+-> final top-k
+```
+
+Reranker 看到的是：
+
+```text
+已经召回的候选
+```
+
+它看不到：
+
+```text
+没有被召回的文档
+```
+
+所以：
+
+```text
+召回负责覆盖正确文档
+Rerank 负责排列正确文档
+```
+
+### 13.1 Reranker 的收益
+
+可能带来：
+
+```text
+更高精度
+更高的前几个位置相关率
+更好的上下文质量
+```
+
+### 13.2 Reranker 的成本
+
+包括：
+
+```text
+额外延迟
+额外费用
+候选数增加时成本上升
+```
+
+所以通常会设置：
+
+```text
+rerank_candidate_k
+```
+
+只对少量候选重排。
+
+---
+
+## 十四、Final Top-K 和 Context K
+
+融合后还要区分：
+
+```text
+final_top_k
+    最终展示或返回给用户多少条
+
+context_k
+    实际送入 LLM 上下文多少条
+```
+
+可能关系：
+
+```text
+final_top_k = 10
+context_k   = 5
+```
+
+表示：
+
+```text
+用户看到 10 条
+LLM 只读取最前面的 5 条
+```
+
+也可能：
+
+```text
+final_top_k = context_k = 5
+```
+
+这取决于：
+
+```text
+上下文窗口
+每 chunk 长度
+生成成本
+展示需求
+```
+
+---
+
+## 十五、混合检索的失败模式
+
+### 15.1 通道高度相关
+
+如果 dense 和 sparse 召回几乎相同：
+
+```text
+混合收益很小
+```
+
+需要看：
+
+```text
+单路 Recall@k
+两路并集 Recall@k
+RRF Recall@k
+```
+
+### 15.2 单通道主导
+
+如果某一路分数范围特别大：
+
+```text
+直接相加时可能吞掉另一路
+```
+
+RRF 可以缓解这个问题。
+
+### 15.3 候选深度过低
+
+表现为：
+
+```text
+最终结果差
+Reranker 也无法修复
+```
+
+原因通常是：
+
+```text
+正确文档没有进入候选池
+```
+
+### 15.4 分数归一化错误
+
+例如：
+
+```text
+把 dense cosine 和未归一化的 sparse score 直接融合
+```
+
+应优先使用 rank fusion 或经过验证的归一化方案。
+
+### 15.5 身份不一致
+
+两路没有使用同一个：
+
+```text
+chunk_id
+point_id
+```
+
+会导致：
+
+```text
+同一内容重复出现
+RRF 无法合并
+```
+
+### 15.6 Reranker 位置错误
+
+Reranker 只能处理候选池。
+
+如果候选池已经缺少正确文档：
+
+```text
+Reranker 无能为力
+```
+
+### 15.7 没有评估集
+
+调参会变成：
+
+```text
+凭感觉看 top-5
+```
+
+无法判断：
+
+```text
+是召回问题
+还是融合问题
+还是重排问题
+```
+
+---
+
+## 十六、混合检索评估
+
+### 16.1 分通道评估
+
+先看：
+
+```text
+Dense Recall@k
+Sparse Recall@k
+```
+
+如果单路都低：
+
+```text
+先修召回器和 chunk
+不要直接调 RRF
+```
+
+### 16.2 看候选并集
+
+看：
+
+```text
+union Recall@k
+```
+
+它回答：
+
+```text
+两路合起来，正确文档有没有进入候选池
+```
+
+### 16.3 看融合结果
+
+看：
+
+```text
+RRF Recall@k
+MRR
+nDCG
+```
+
+它回答：
+
+```text
+融合有没有把正确文档排到前面
+```
+
+### 16.4 看 Rerank 增益
+
+比较：
+
+```text
+Rerank 前 nDCG
+Rerank 后 nDCG
+```
+
+如果提升有限：
+
+```text
+说明召回候选已经不错，或者 reranker 不适合当前领域
+```
+
+---
+
+## 十七、参数调节顺序
+
+推荐顺序：
+
+```text
+1. 固定 chunk 策略
+2. 评估 dense Recall@k
+3. 评估 sparse Recall@k
+4. 评估 union Recall@k
+5. 调整 candidate_k
+6. 调整 rrf_k
+7. 调整通道权重
+8. 调整 rerank_candidate_k
+9. 选择 final_top_k
+10. 最后确定 context_k
+```
+
+不要同时修改：
+
+```text
+chunk_size
+embedding model
+candidate_k
+rrf_k
+reranker
+context_k
+```
+
+否则无法归因。
+
+---
+
+## 十八、当前项目实现
+
+当前项目使用：
+
+```text
+Dense Channel
+    Qwen embedding
+    Qdrant dense vector
+    cosine similarity
+
+Sparse Channel
+    当前实现为 jieba + BM25
+    写入 Qdrant sparse vector
+
+Fusion
+    RRF
+    默认 rrf_k = 60
+
+Rerank
+    gte-rerank-v2
+
+Generation
+    qwen-turbo
+```
+
+默认参数：
+
+```text
+candidate_k        = 20
+rrf_k              = 60
+rerank_candidate_k = 20
+final_top_k        = 5
+context_k          = 5
+```
+
+当前流程：
+
+```text
+query
+-> dense top-20
+-> sparse top-20
+-> RRF
+-> rerank candidate top-20
+-> final top-5
+-> context top-5
+```
+
+实现位置：
+
+```text
+pipeline/hybrid_retriever.py
+pipeline/rag_server.py
+pipeline/static/index.html
+```
+
+这里需要特别说明：
+
+```text
+BM25 只是当前 sparse 通道的实现
+不是混合检索的定义
+不是 RRF 的前提
+```
+
+未来可以替换：
+
+```text
+BM25
+-> SPLADE
+-> BGE-M3 sparse
+-> 其他 learned sparse
+```
+
+只要它仍然提供：
+
+```text
+候选
+rank
+chunk_id
+```
+
+就可以继续进入同一套 RRF 融合。
+
+---
+
+## 十九、一页速记
+
+```text
+混合检索
+    多条通道独立召回
+
+Dense channel
+    语义向量
+
+Sparse channel
+    稀疏词项或学习型稀疏表示
+    当前项目用 BM25
+
+Candidate pool
+    多路候选统一去重
 
 RRF
-    RRF(d) = Σ_i 1 / (k + rank_i(d))
-    只看排名, 不比较原始分数
-    k 常取 60, 但应通过评估集调参
+    基于 rank 的排名融合
 
-Hybrid
-    dense + sparse 两路召回
-    RRF 融合
-    rerank 精排
+rrf_k
+    公式平滑常数
+
+candidate_k
+    每路候选深度
+
+rerank_candidate_k
+    送入 Reranker 的候选数
+
+final_top_k
+    最终展示条数
+
+context_k
+    送入 LLM 的上下文条数
 ```
 
-最终记住一句话:
+最重要的一句话：
 
 ```text
-BM25 负责“字面命中”,
-embedding 负责“语义相近”,
-RRF 负责“合并排名”,
-rerank 负责“精挑细选”。
+混合检索不是把分数相加，
+而是让不同召回机制各自提供候选，
+再用排名融合和重排逐步提高最终上下文质量。
 ```
