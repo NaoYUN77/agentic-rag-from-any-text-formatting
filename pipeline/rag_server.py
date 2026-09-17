@@ -32,10 +32,13 @@ from hybrid_retriever import HybridRetriever
 from generation import QwenChatGenerator
 from reranker import DashScopeReranker
 
-QDRANT_PATH = "qdrant_data"
-COLLECTION = "redhat"
-SPARSE_COLLECTION = "redhat_sparse"
-SPARSE_ARTIFACT_DIR = Path(__file__).parent / "index_artifacts"
+QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
+COLLECTION = os.getenv("RAG_DENSE_COLLECTION", "redhat")
+SPARSE_COLLECTION = os.getenv("RAG_SPARSE_COLLECTION", "redhat_sparse")
+SPARSE_ARTIFACT_DIR = Path(os.getenv(
+    "RAG_SPARSE_ARTIFACT_DIR",
+    str(Path(__file__).parent / "index_artifacts"),
+))
 STATIC_DIR = Path(__file__).parent / "static"
 
 _state: Dict[str, Any] = {}

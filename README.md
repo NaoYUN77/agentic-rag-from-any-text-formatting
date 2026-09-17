@@ -57,7 +57,7 @@ URL / PDF / Scan / HTML / Markdown / Office
         +-----------+-----------+
                     |
                     v
-          DocumentBlock JSON               [规划中]
+          DocumentBlock JSON               [Phase 0]
                     |
                     v
         Cleaning / Normalization
@@ -92,7 +92,7 @@ Parent / IndexReadyChunk      Chunk
       Answer + Citations -> FastAPI / Web
 ```
 
-> 当前状态：在线服务仍使用旧的 `LlamaIndex FixedSemanticNodeParser`。Phase 0 的 `BlockAwareHierarchicalChunkBuilder` 已能生成 `ParentNode + IndexReadyChunk`，但尚未接入 Qdrant。
+> 当前状态：Phase 0 的 `ParentNode + IndexReadyChunk` 已可通过 `ingest.qdrant_indexer` 写入独立 Qdrant collection。在线服务默认仍使用旧的 `LlamaIndex FixedSemanticNodeParser`，可通过环境变量切换到 Phase 0 索引。
 
 
 ## 当前在线索引状态（旧链路）
@@ -146,6 +146,17 @@ $env:DASHSCOPE_API_KEY = "sk-..."
 .\.venv_rag\Scripts\python.exe format_router_demo.py `
     --file corpus/my_document.md `
     --out-dir experiments/router_demo
+```
+
+Phase 0 JSON 入库:
+
+```powershell
+.\.venv_rag\Scripts\python.exe -m ingest.qdrant_indexer `
+    --export-dir experiments/router_demo `
+    --dense-collection phase0_dense `
+    --sparse-collection phase0_sparse `
+    --artifact-dir index_artifacts/phase0 `
+    --rebuild
 ```
 
 ## 仓库结构
@@ -390,8 +401,8 @@ $env:SPARSE_QUERY = "你自己的查询"
 
 ## 六、当前进度
 
-> 当前在线服务仍使用旧的 LlamaIndex chunks。
-> Phase 0 多格式摄取和 Block-aware chunking 已实现，但还没有接入 Qdrant。
+> Phase 0 多格式摄取、Block-aware chunking 和 JSON -> Qdrant 入库已接通。
+> 在线服务默认仍使用旧的 LlamaIndex chunks，可通过环境变量切换到 Phase 0 索引。
 
 ### 已完成
 
@@ -401,6 +412,8 @@ $env:SPARSE_QUERY = "你自己的查询"
 [x] 质量门控         Raw Parse Quality Gate + Index Decision
 [x] Block 清理       heading / code / formula / table / image 感知
 [x] Block-aware 切块 ParentNode / IndexReadyChunk / overlap / token 上限
+[x] Phase 0 入库     IndexReadyChunk -> Dense / Sparse / Qdrant
+[x] 稳定映射         dense / sparse 共用 point id，payload 保留 chunk_id
 [x] 在线检索链路     旧 LlamaIndex chunks -> Dense / Sparse / Qdrant / RRF / Rerank
 [x] 生成与引用       retrieval context -> Qwen answer + [C1] citations
 [x] 实验归档         原始输出 + findings + 复现命令
@@ -409,7 +422,6 @@ $env:SPARSE_QUERY = "你自己的查询"
 ### Phase 0 未闭环
 
 ```text
-[ ] Chunk 入库       IndexReadyChunk 还没有写入 Qdrant
 [ ] 语义边界         window_tokens 还没有接入 embedding 边界微调
 [ ] Parent expansion 检索 leaf 后返回 parent context
 [ ] 字段化 BM25F     heading 权重和正文权重还没有分离
@@ -420,10 +432,10 @@ $env:SPARSE_QUERY = "你自己的查询"
 ### 推荐下一步
 
 ```text
-1. 用新 ChunkBuilder 重跑现有全部语料，比较新旧 chunk 分布。
-2. 将 IndexReadyChunk 接入 dense / sparse / Qdrant，并复用同一个 chunk_id。
+1. 用新 ChunkBuilder 重跑现有全部语料并建立 Phase 0 索引。
+2. 通过环境变量让在线服务查询 phase0_dense / phase0_sparse。
 3. 重建 qrels，分阶段评估 dense、sparse、RRF 和 rerank。
-4. 最后再把 embedding 语义边界微调并入 ChunkBuilder。
+4. 实现 Parent expansion，最后再接入 embedding 语义边界微调。
 ```
 
 ---

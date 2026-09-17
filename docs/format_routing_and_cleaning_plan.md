@@ -8,6 +8,7 @@
 > - 已实现 LlamaIndex FixedSemanticNodeParser
 > - Phase 0 已实现 URL/HTML/Markdown/PDF 路由、DocumentBlock 输出、Raw Quality Gate
 > - 已实现 Block-aware Hierarchical ChunkBuilder 的 Parent/Leaf 和 fragments 输出
+> - 已实现 Phase 0 JSON -> Qdrant dense/sparse 入库和稳定 point id 映射
 > - Docling、Office、图片多模态和质量校准仍是规划内容
 
 ---

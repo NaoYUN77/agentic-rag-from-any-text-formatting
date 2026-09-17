@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- 新增 `pipeline/ingest/qdrant_indexer.py`，支持把 Phase 0 的 `artifact.json + chunks.jsonl` 写入 Qdrant。
+- dense 使用 `dense_text` 生成 embedding，sparse 使用 `sparse_text` 生成 jieba + BM25 sparse vector。
+- dense 和 sparse 使用同一个稳定 point id，并把原始 `chunk_id`、`fragments`、质量和索引决策写入 payload。
+- 新增 `pipeline/tests/test_qdrant_indexer.py`。
+
+### Changed
+
+- `rag_server.py` 支持通过 `RAG_QDRANT_PATH`、`RAG_DENSE_COLLECTION`、`RAG_SPARSE_COLLECTION`、`RAG_SPARSE_ARTIFACT_DIR` 切换索引。
+
+### Verified
+
+- 9 个单元与集成测试通过。
+- Phase 0 JSON 已能在临时 Qdrant 中同时创建 dense 和 sparse collection。
+- low quality 的 dense-only chunk 不会写入 sparse collection。
+
 ## v0.0.2 - 2026-09-16
 
 ### Added
