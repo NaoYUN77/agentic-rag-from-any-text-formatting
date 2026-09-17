@@ -2,6 +2,8 @@
 
 `pipeline/` 保存可运行的 RAG 工程实现、测试、实验和本地数据。
 
+Block 分片、overlap、fragments 和 Qdrant 入库的实现细节见 `../docs/block_aware_chunking_implementation.md`。
+
 ## 1. 活跃实现
 
 ```text
@@ -14,25 +16,38 @@ ingest/                      多格式摄取 Phase 0
   quality.py                 Raw Parse Quality Gate + Index Decision
   chunker.py                 Block-aware Hierarchical ChunkBuilder
   pipeline.py                IngestPipeline 编排
+  qdrant_indexer.py          Phase 0 JSON -> Qdrant dense + sparse
 
 format_router_demo.py        Phase 0 摄取 CLI
 tests/test_format_router.py  路由、Parser、质量门控、ChunkBuilder 测试
+tests/test_qdrant_indexer.py Phase 0 JSON -> Qdrant 集成测试
 ```
 
-## 2. 当前在线链路
+## 2. 当前两条链路
 
-现有检索服务仍使用旧的 LlamaIndex chunks：
+### Phase 0 摄取与索引
 
 ```text
-固定长度与语义边界 NodeParser
--> Dense / Sparse
--> Qdrant
+URL / 文件
+-> Format Router / Parser
+-> DocumentArtifact / DocumentBlock
+-> Block-aware ChunkBuilder
+-> IndexReadyChunk
+-> qdrant_indexer
+-> Dense / Sparse Qdrant
+```
+
+### 在线检索服务
+
+```text
+Qdrant Dense
+-> Qdrant Sparse
 -> RRF
 -> Rerank
 -> Generation
 ```
 
-Phase 0 已经能生成 `ParentNode + IndexReadyChunk`，但还没有接入 Qdrant 入库链路。两条链路不要混淆。
+Phase 0 可以通过 `ingest.qdrant_indexer` 写入独立的 `phase0_dense` 和 `phase0_sparse` collection。在线服务默认仍读取旧的 `redhat / redhat_sparse`，需要通过环境变量切换。
 
 ## 3. 运行环境
 
@@ -74,7 +89,52 @@ parents.json
 chunks.jsonl
 ```
 
-## 6. 其他目录
+## 6. Phase 0 JSON 入库 Qdrant
+
+保证 FastAPI 服务已停止，避免 Qdrant local 文件锁冲突。
+
+```powershell
+.\.venv_rag\Scripts\python.exe -m ingest.qdrant_indexer `
+    --export-dir experiments/router_demo `
+    --qdrant-path qdrant_data `
+    --dense-collection phase0_dense `
+    --sparse-collection phase0_sparse `
+    --artifact-dir index_artifacts/phase0 `
+    --embedding-backend qwen `
+    --rebuild
+```
+
+只检查导出文件和索引计划，不调用 embedding 和 Qdrant：
+
+```powershell
+.\.venv_rag\Scripts\python.exe -m ingest.qdrant_indexer `
+    --export-dir experiments/router_demo `
+    --dry-run
+```
+
+输出：
+
+```text
+phase0_dense       dense vectors
+phase0_sparse      BM25 sparse vectors
+index_artifacts/phase0/vocab.json
+index_artifacts/phase0/bm25_stats.json
+index_artifacts/phase0/index_manifest.json
+```
+
+用 Phase 0 索引启动服务：
+
+```powershell
+$env:RAG_QDRANT_PATH = "qdrant_data"
+$env:RAG_DENSE_COLLECTION = "phase0_dense"
+$env:RAG_SPARSE_COLLECTION = "phase0_sparse"
+$env:RAG_SPARSE_ARTIFACT_DIR = "index_artifacts/phase0"
+
+.\.venv_rag\Scripts\python.exe -m uvicorn rag_server:app `
+    --host 127.0.0.1 --port 8000
+```
+
+## 7. 其他目录
 
 ```text
 corpus/          本地语料，第三方版权内容不提交
@@ -86,7 +146,7 @@ qdrant_data/     本地向量库，不提交
 static/          FastAPI Web 页面
 ```
 
-## 7. 数据与密钥
+## 8. 数据与密钥
 
 - API Key 只通过环境变量或本地未跟踪文件提供。
 - 不提交第三方 PDF、完整 Markdown 语料、Qdrant 数据、索引产物和日志。

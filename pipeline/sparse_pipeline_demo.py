@@ -521,9 +521,13 @@ def store_sparse_collection(
     collection: str,
     chunks: Sequence[Chunk],
     index: SparseBM25Index,
+    weights: Optional[Sequence[float]] = None,
     rebuild: bool = False,
 ) -> int:
-    """把 BM25 sparse vector 写入 Qdrant 的独立 sparse collection。"""
+    """把 BM25 sparse vector 写入 Qdrant 的独立 sparse collection。
+
+    如果 weights 为空, 会读取 chunk.metadata["index_decision"]["sparse_weight"]。
+    """
     from qdrant_client import QdrantClient
     from qdrant_client.models import PointStruct, SparseVector, SparseVectorParams
 
@@ -552,9 +556,22 @@ def store_sparse_collection(
                 sparse_vectors_config={"sparse": SparseVectorParams()},
             )
 
+        if weights is not None and len(weights) != len(chunks):
+            raise ValueError("weights length must match chunks length")
+
         points = []
         for doc_idx, chunk in enumerate(chunks):
             indices, values = index.describe_sparse(doc_idx)
+            if weights is None:
+                decision = chunk.metadata.get("index_decision") or {}
+                if isinstance(decision, dict):
+                    weight = float(decision.get("sparse_weight", 1.0))
+                else:
+                    weight = 1.0
+            else:
+                weight = float(weights[doc_idx])
+            if weight != 1.0:
+                values = [float(value) * weight for value in values]
             payload = dict(chunk.metadata)
             payload["text"] = chunk.text
             payload["source_point_id"] = chunk.point_id

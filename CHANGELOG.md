@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- 新增 `pipeline/ingest/qdrant_indexer.py`，支持把 Phase 0 的 `artifact.json + chunks.jsonl` 写入 Qdrant。
+- dense 使用 `dense_text` 生成 embedding，sparse 使用 `sparse_text` 生成 jieba + BM25 sparse vector。
+- dense 和 sparse 使用同一个稳定 point id，并把原始 `chunk_id`、`fragments`、质量和索引决策写入 payload。
+- 新增 `pipeline/tests/test_qdrant_indexer.py`。
+- 新增 Anthropic Contextual Retrieval Phase 0 全链路 finding。
+
+### Changed
+
+- HTML Parser 会比较 Trafilatura 与 Readability Markdown 的 heading 完整性，优先保留结构更完整的正文。
+- `rag_server.py` 支持通过 `RAG_QDRANT_PATH`、`RAG_DENSE_COLLECTION`、`RAG_SPARSE_COLLECTION`、`RAG_SPARSE_ARTIFACT_DIR` 切换索引。
+- FastAPI 检索和引用响应增加 `chunk_id`、`artifact_id`。
+- Qdrant local rebuild 会在关闭客户端后清理目标 collection 目录，避免旧 artifact 的 point 残留。
+
+### Verified
+
+- 10 个单元与集成测试通过。
+- Anthropic Contextual Retrieval 文章：78 blocks、17 chunks、17 dense points、17 sparse points。
+- 旧 FastAPI 已通过 Dense、Sparse、Hybrid、Rerank 和 Answer 接口验证。
+- low quality 的 dense-only chunk 不会写入 sparse collection。
+
 ## v0.0.2 - 2026-09-16
 
 ### Added

@@ -31,6 +31,8 @@ class Citation:
     page: int | None
     section: str | None
     chunk_index: int | None
+    chunk_id: str | None
+    artifact_id: str | None
 
 
 @dataclass
@@ -77,6 +79,8 @@ def build_context(
             page=payload.get("page"),
             section=payload.get("section"),
             chunk_index=payload.get("chunk_index"),
+            chunk_id=payload.get("chunk_id"),
+            artifact_id=payload.get("artifact_id"),
         ))
         used += len(block)
 
