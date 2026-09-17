@@ -11,6 +11,7 @@
 | `ingest_pipeline_progress.md` | 当前 Phase 0 实现状态、验证数据、未完成项和下一步 |
 | `block_aware_chunking_implementation.md` | 当前 Block -> Piece -> Chunk、overlap、fragments 和 Qdrant 入库实现说明 |
 | `phase0_loop_verification.md` | 语料扩充与 Phase 0 端到端功能闭环验证结论、踩坑记录 |
+| `zh_query_crosslingual_eval.md` | 中文 Query 跨语言检索方案对照实验（A/B/C 三方案） |
 
 ## 2. Chunking
 
