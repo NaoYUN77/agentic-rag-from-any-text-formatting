@@ -40,3 +40,4 @@ rag_chunking_concepts.md      当前认知(会随新实验迭代, 引用 finding
 | 09 | RRF + Rerank smoke 对比 | `19_rerank_compare.txt` | 已完成 |
 | 10 | 增量加入 NGINX PDF 语料 | `20_nginx_ingest_verify.txt`<br>`21_nginx_ingest_stats.txt` | 已完成 |
 | 11 | LlamaIndex 800/400 全量重建 | `24_llamaindex_rebuild.txt`<br>`25_llamaindex_rebuild.txt` | 已完成 |
+| 12 | Anthropic Contextual Retrieval Phase 0 全链路 | `experiments/anthropic_contextual_retrieval/`<br>`index_artifacts/anthropic_contextual_retrieval/` | 已完成 |

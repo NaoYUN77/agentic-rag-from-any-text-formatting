@@ -31,6 +31,10 @@ r"""把 Phase 0 JSON 导出结果写入 Qdrant dense + sparse 索引。
 from __future__ import annotations
 
 import argparse
+import re
+import gc
+import time
+import shutil
 import hashlib
 import json
 import sys
@@ -336,6 +340,44 @@ def _sparse_chunks(plan: IndexPlan) -> List[Chunk]:
     return chunks
 
 
+def _collection_storage_dir(qdrant_path: Path, collection: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", collection):
+        raise ValueError(f"unsafe collection name: {collection!r}")
+    return qdrant_path / "collection" / collection
+
+
+def _delete_collections(qdrant_path: Path, collections: Sequence[str]) -> None:
+    """Delete target collections before a rebuild.
+
+    Qdrant local on Windows can leave the collection SQLite directory behind
+    after delete_collection(). Removing the validated collection directory is
+    required so a rebuild cannot mix points from two artifact generations.
+    """
+    client = QdrantClient(path=str(qdrant_path))
+    try:
+        for collection in collections:
+            if client.collection_exists(collection):
+                client.delete_collection(collection)
+    finally:
+        client.close()
+    del client
+    gc.collect()
+
+    for collection in collections:
+        storage_dir = _collection_storage_dir(qdrant_path, collection)
+        if not storage_dir.exists():
+            continue
+        for attempt in range(5):
+            try:
+                shutil.rmtree(storage_dir)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                gc.collect()
+                time.sleep(0.1)
+
+
 def write_index(
     plan: IndexPlan,
     embeddings: Any,
@@ -352,13 +394,16 @@ def write_index(
     qpath.mkdir(parents=True, exist_ok=True)
     adir.mkdir(parents=True, exist_ok=True)
 
+    if rebuild:
+        _delete_collections(qpath, (dense_collection, sparse_collection))
+
     dense_points = _write_dense(
         plan=plan,
         embeddings=embeddings,
         qdrant_path=qpath,
         collection=dense_collection,
         vector_size=vector_size,
-        rebuild=rebuild,
+        rebuild=False,
     )
 
     sparse_chunks = _sparse_chunks(plan)
@@ -375,7 +420,7 @@ def write_index(
         collection=sparse_collection,
         chunks=sparse_chunks,
         index=sparse_index,
-        rebuild=rebuild,
+        rebuild=False,
     )
 
     manifest = {

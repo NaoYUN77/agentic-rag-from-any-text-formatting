@@ -145,7 +145,7 @@ Chunk 不是 Block 的替代品，也不应该复制 Block 的全部结构信息
 结果：
 
 ```text
-Ran 9 tests
+Ran 10 tests
 OK
 ```
 
@@ -160,6 +160,7 @@ OK
 - IndexDecision 对 dense/sparse 分支的控制
 - dense/sparse 共用稳定 point id
 - sparse_weight 真正乘入 BM25 document vector
+- Qdrant local rebuild 会清理旧 collection point
 
 ### 合成长文本测试
 
@@ -206,6 +207,18 @@ dense points: 49
 sparse points: 49
 sparse vocabulary: 842
 manifest: ok
+
+### Anthropic Contextual Retrieval 验证
+
+```text
+parser: readability_structured
+blocks: 78
+chunks: 17
+dense points: 17
+sparse points: 17
+sparse vocabulary: 693
+FastAPI: dense / sparse / hybrid / rerank / answer OK
+```
 ```
 
 

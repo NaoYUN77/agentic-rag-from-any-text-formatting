@@ -111,6 +111,8 @@ class SearchRequest(BaseModel):
 
 class Hit(BaseModel):
     point_id: int | str
+    chunk_id: Optional[str] = None
+    artifact_id: Optional[str] = None
     rank: int
     score: float
     rrf_score: Optional[float] = None
@@ -160,6 +162,8 @@ class AnswerRequest(SearchRequest):
 class CitationOut(BaseModel):
     index: int
     point_id: int | str
+    chunk_id: Optional[str] = None
+    artifact_id: Optional[str] = None
     file_name: Optional[str] = None
     page: Optional[int] = None
     section: Optional[str] = None
@@ -199,6 +203,8 @@ def _to_hit(p, rank: int, mode: str) -> Hit:
 
     return Hit(
         point_id=p.point_id,
+        chunk_id=pl.get("chunk_id"),
+        artifact_id=pl.get("artifact_id"),
         rank=rank,
         score=round(float(display_score), 6),
         rrf_score=round(p.rrf_score, 6) if p.rrf_score is not None else None,
@@ -311,6 +317,8 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         CitationOut(
             index=c.index,
             point_id=c.point_id,
+            chunk_id=c.chunk_id,
+            artifact_id=c.artifact_id,
             file_name=c.file_name,
             page=c.page,
             section=c.section,

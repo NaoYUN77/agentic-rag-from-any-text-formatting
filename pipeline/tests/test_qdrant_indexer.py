@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Sequence
 
 from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct
 
 from ingest.qdrant_indexer import (
     build_index_plan,
@@ -200,6 +201,71 @@ class QdrantIndexerTests(unittest.TestCase):
                 self.assertEqual(sparse[0].payload["section"], "Proxy > Keepalived")
             finally:
                 client.close()
+
+    def test_rebuild_removes_stale_collection_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            export_dir = root / "export"
+            qdrant_path = root / "qdrant_data"
+            artifact_dir = root / "index_artifacts"
+            _write_export(export_dir)
+            plan = build_index_plan([load_export_bundle(export_dir)])
+
+            write_index(
+                plan=plan,
+                embeddings=FixedEmbeddings(dim=4),
+                qdrant_path=qdrant_path,
+                dense_collection="phase0_dense_test",
+                sparse_collection="phase0_sparse_test",
+                artifact_dir=artifact_dir,
+                vector_size=4,
+                rebuild=True,
+            )
+
+            client = QdrantClient(path=str(qdrant_path))
+            try:
+                client.upsert(
+                    collection_name="phase0_dense_test",
+                    points=[PointStruct(
+                        id=999,
+                        vector=[1.0, 0.0, 0.0, 0.0],
+                        payload={"chunk_id": "stale"},
+                    )],
+                    wait=True,
+                )
+                self.assertEqual(
+                    client.get_collection("phase0_dense_test").points_count,
+                    plan.dense_count + 1,
+                )
+            finally:
+                client.close()
+
+            manifest = write_index(
+                plan=plan,
+                embeddings=FixedEmbeddings(dim=4),
+                qdrant_path=qdrant_path,
+                dense_collection="phase0_dense_test",
+                sparse_collection="phase0_sparse_test",
+                artifact_dir=artifact_dir,
+                vector_size=4,
+                rebuild=True,
+            )
+            self.assertEqual(manifest["dense_points"], plan.dense_count)
+
+            client = QdrantClient(path=str(qdrant_path))
+            try:
+                self.assertEqual(
+                    client.retrieve(
+                        collection_name="phase0_dense_test",
+                        ids=[999],
+                        with_payload=True,
+                    ),
+                    [],
+                )
+            finally:
+                client.close()
+
+
     def test_sparse_weight_is_applied_to_document_vector(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             qdrant_path = Path(temp_dir) / "qdrant"

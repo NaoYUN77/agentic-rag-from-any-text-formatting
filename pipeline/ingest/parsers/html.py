@@ -2,10 +2,12 @@ r"""HTML -> DocumentArtifact。"""
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 import trafilatura
 from bs4 import BeautifulSoup
+from markdownify import markdownify as html_to_markdown
 from readability import Document as ReadabilityDocument
 
 from ..models import DocumentArtifact, DocumentBlock, SourcePayload
@@ -45,6 +47,11 @@ def _readability_fallback(html: str) -> str:
     return doc.summary(html_partial=True) or ""
 
 
+def _heading_count(markdown: str) -> int:
+    """Count Markdown ATX headings, used to compare extractor structure."""
+    return len(re.findall(r"(?m)^#{1,6}\s+\S", markdown))
+
+
 def _extract_code_blocks(html: str) -> list[tuple[Optional[str], str]]:
     soup = BeautifulSoup(html, "lxml")
     out: list[tuple[Optional[str], str]] = []
@@ -66,14 +73,33 @@ def parse_html(source: SourcePayload) -> DocumentArtifact:
     encoding = source.encoding or "utf-8"
     html = source.data.decode(encoding, errors="replace")
     markdown, metadata = _extract_trafilatura(html, source.final_uri)
+    trafilatura_markdown = markdown.strip()
+    readability_html = _readability_fallback(html)
+    readability_markdown = (
+        html_to_markdown(readability_html, heading_style="ATX").strip()
+        if readability_html
+        else ""
+    )
 
     parser = "trafilatura"
-    if not markdown.strip():
-        fallback = _readability_fallback(html)
-        if fallback:
-            soup = BeautifulSoup(fallback, "lxml")
-            markdown = soup.get_text("\n", strip=True)
+    if not trafilatura_markdown:
+        if readability_markdown:
+            markdown = readability_markdown
             parser = "readability_fallback"
+    elif readability_markdown:
+        trafilatura_headings = _heading_count(trafilatura_markdown)
+        readability_headings = _heading_count(readability_markdown)
+        minimum_chars = min(300, max(1, len(trafilatura_markdown) // 2))
+        if (
+            readability_headings > trafilatura_headings
+            and len(readability_markdown) >= minimum_chars
+        ):
+            markdown = readability_markdown
+            parser = "readability_structured"
+        else:
+            markdown = trafilatura_markdown
+    else:
+        markdown = trafilatura_markdown
 
     artifact = parse_markdown_text(markdown, source, parser=parser)
     artifact.title = metadata.get("title") or artifact.title
