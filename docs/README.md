@@ -6,6 +6,7 @@
 
 | 文档 | 定位 |
 |---|---|
+| `project_overview_for_agents.md` | **新 Agent 接手总览**：项目目标、架构、已实现、未实现、待新增、约束和代码地图 |
 | `format_routing_and_cleaning_plan.md` | 多格式摄取、格式路由、质量门控、Block 与 Chunk 的架构方案 |
 | `ingest_pipeline_progress.md` | 当前 Phase 0 实现状态、验证数据、未完成项和下一步 |
 | `block_aware_chunking_implementation.md` | 当前 Block -> Piece -> Chunk、overlap、fragments 和 Qdrant 入库实现说明 |
