@@ -25,7 +25,7 @@
 |---|---|
 | `sparse_vs_dense_retrieval.md` | 稀疏与稠密召回的共同概念 |
 | `sparse_retrieval_concepts.md` | 词项、词表、倒排索引、稀疏向量与 BM25 |
-| `retrieval_scoring_and_rrf.md` | TF-IDF、BM25、RRF、混合检索与打分 |
+| `retrieval_scoring_and_rrf.md` | 混合检索、多路召回、候选深度、RRF、加权融合、重排与评估 |
 | `top_k_and_candidate_depth.md` | Top-K、candidate_k、RRF k、rerank、context_k 与 Recall@k |
 
 ## 4. 学习与复习
