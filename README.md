@@ -230,6 +230,7 @@ pipeline/    实现与数据  "代码在哪、环境在哪、数据在哪"
 | `sparse_vs_dense_retrieval.md` | 1137 行 | **共用检索概念** | 稀疏/稠密两条召回范式 / 词表 / 倒排索引 / embedding / ANN / 失效模式 | 公式推导 + `pipeline/experiments/14 15 16` |
 | `sparse_retrieval_concepts.md` | 1160 行 | **稀疏检索通用原理** | 词项 / 词表 / 倒排索引 / 稀疏向量 / tf / df / IDF / BM25 | 通用概念 + 手算例子 |
 | `retrieval_scoring_and_rrf.md` | 1016 行 | **打分与融合** | 词袋 / TF-IDF / BM25 / RRF / 混合检索 / 工程落地 | 公式推导 + `pipeline/experiments/16 17 19` |
+| `top_k_and_candidate_depth.md` | 概念文档 | **Top-K 与候选深度** | per-channel top_k / candidate_k / rrf_k / rerank_candidate_k / final_top_k / context_k / Recall@k | 概念 + 当前实现映射 |
 | `RAG_learn.md` | 454 行 | **入门索引** | 学习资源清单(10 个, 含 URL), 并指向工作区内部阅读路线 | 无 |
 | `RAG_review_route.md` | 668 行 | **复习路线** | Chunk/OpenAI 基线 / 今日状态 / 复习顺序 / 自测题 | `pipeline/experiments/01 ~ 25` |
 | `format_routing_and_cleaning_plan.md` | 规划文档 | **格式路由计划** | URL/HTML/PDF/扫描件/代码/公式/图片/OCR 质量门控 | 方案设计 |
@@ -250,6 +251,7 @@ pipeline/    实现与数据  "代码在哪、环境在哪、数据在哪"
 8. 规划多格式摄取  -> format_routing_and_cleaning_plan.md
 9. 查看当前进度    -> ingest_pipeline_progress.md
 10. 想看切块实现   -> block_aware_chunking_implementation.md
+11. 搞懂 Top-K       -> top_k_and_candidate_depth.md
 ```
 
 ---
