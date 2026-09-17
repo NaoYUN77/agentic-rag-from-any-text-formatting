@@ -234,6 +234,7 @@ pipeline/    实现与数据  "代码在哪、环境在哪、数据在哪"
 | `RAG_review_route.md` | 668 行 | **复习路线** | Chunk/OpenAI 基线 / 今日状态 / 复习顺序 / 自测题 | `pipeline/experiments/01 ~ 25` |
 | `format_routing_and_cleaning_plan.md` | 规划文档 | **格式路由计划** | URL/HTML/PDF/扫描件/代码/公式/图片/OCR 质量门控 | 方案设计 |
 | `ingest_pipeline_progress.md` | 289 行 | **当前进度** | Phase 0 实现、验证数据、风险和下一步 | 代码 + 测试 + CLI 实测 |
+| `block_aware_chunking_implementation.md` | 实现说明 | **当前切块实现** | Block -> Piece -> Chunk、overlap、fragments、Dense/Sparse Qdrant | 当前代码 + 9 个测试 + E2E |
 
 **推荐阅读顺序:**
 
@@ -248,6 +249,7 @@ pipeline/    实现与数据  "代码在哪、环境在哪、数据在哪"
 7. 想用框架        -> semantic_chunking_notes.md 或 llamaindex_chunking_notes.md
 8. 规划多格式摄取  -> format_routing_and_cleaning_plan.md
 9. 查看当前进度    -> ingest_pipeline_progress.md
+10. 想看切块实现   -> block_aware_chunking_implementation.md
 ```
 
 ---

@@ -2,6 +2,8 @@
 
 `pipeline/` 保存可运行的 RAG 工程实现、测试、实验和本地数据。
 
+Block 分片、overlap、fragments 和 Qdrant 入库的实现细节见 `../docs/block_aware_chunking_implementation.md`。
+
 ## 1. 活跃实现
 
 ```text
