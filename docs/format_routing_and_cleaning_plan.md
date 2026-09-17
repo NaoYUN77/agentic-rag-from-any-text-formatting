@@ -274,12 +274,12 @@ Chunk 只保存检索视图:
 ```text
 fragments = [
     block_id
-    start
-    end
+    start_char
+    end_char
 ]
 ```
 
-其中 `start/end` 表示字符或 token 范围。原子 Block 可以整块引用，普通文本 Block 可以引用局部范围。
+其中 `start_char/end_char` 统一表示 `block.text` 内的字符范围，使用半开区间 `[start_char, end_char)`。Token 数只通过 `token_count` 单独记录，不能作为 Fragment 的定位单位。原子 Block 可以整块引用，普通文本 Block 可以引用局部范围。
 
 ### Heading 与 Sparse 的注意事项
 
@@ -605,6 +605,60 @@ ordered_fragments
   "end_char": 180
 }
 ```
+
+### 字符偏移单位与坐标系
+
+`start_char` 和 `end_char` 是 Fragment 的来源定位字段，统一使用字符偏移，不使用 token 偏移。
+
+```text
+单位:
+    Unicode code point
+    Python 中对应 str 下标
+
+基准文本:
+    CleanDocumentArtifact 中该 Block 的规范化 block.text
+
+区间:
+    [start_char, end_char)
+    start_char 包含，end_char 不包含
+
+截取公式:
+    fragment_text = block.text[start_char:end_char]
+```
+
+因此必须满足:
+
+```text
+0 <= start_char < end_char <= len(block.text)
+fragment.text == block.text[start_char:end_char]
+```
+
+Token 只作为预算和统计信息，不能替代字符偏移:
+
+```text
+token_count
+    当前 Fragment 或 Chunk 的 token 数
+
+start_token / end_token
+    可选辅助字段
+    依赖具体 tokenizer
+    不能用于跨 embedding 模型稳定定位原文
+```
+
+同时区分三种互不混用的坐标:
+
+```text
+start_char / end_char
+    Block 内部字符范围，用于 Fragment 溯源和重建
+
+start_byte / end_byte
+    UTF-8 等编码下的字节范围
+
+source_locations
+    PDF page / bbox / HTML DOM path / 原始 URL 等外部来源位置
+```
+
+跨语言实现时需要固定规则。这里的字符指 Unicode code point，对应 Python `len(str)` 和字符串切片；JavaScript 使用 UTF-16 index，遇到 BMP 之外字符时需要做索引转换。
 
 ### Block 分组的硬约束
 
