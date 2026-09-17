@@ -102,68 +102,139 @@ Phase 0 IndexReadyChunk
 
 ```text
                     Source
-               URL / File / PDF
+          URL / File / PDF / Markdown
                         |
                         v
-                 Format Router
+                  Source Loader
+              (本地读取 / URL 下载)
+                        |
+                        v
+                  Format Router
+        (mime + magic bytes + 扩展名 + 内容嗅探)
                         |
         +---------------+---------------+
         |               |               |
         v               v               v
-      HTML           Markdown          PDF
+      HTML          Markdown           PDF
         |               |               |
- Trafilatura      Markdown Parser    MinerU
- Readability                         PyMuPDF
- BeautifulSoup
+  parse_html()    状态机解析      MinerU / PyMuPDF
+   双路并行择优:                  (扫描件 OCR 未实现)
+   ├ Trafilatura
+   └ Readability  (7:3 择优, 按 heading 数)
+   + BeautifulSoup 代码块补充
         |               |               |
         +---------------+---------------+
                         |
                         v
               DocumentArtifact
-              DocumentBlock[]
+              DocumentBlock[]        ← 统一中间表示
+      (text/heading/list/code/formula/image)
                         |
                         v
-              Raw Quality Gate
+              Raw Quality Gate       ← 决定是否换 fallback parser
                         |
                         v
                  Block Cleaner
+          (去样板/去重/重排 order)
                         |
                         v
-              Index Quality Gate
+              Index Quality Gate     ← 决定 dense/sparse 准入
                         |
                         v
-       Block-aware Hierarchical ChunkBuilder
+       BlockAwareHierarchicalChunkBuilder
+                    (自建, 非 LlamaIndex)
                         |
          +--------------+--------------+
          |                             |
          v                             v
     ParentNode                  IndexReadyChunk
-                                      |
-                    +-----------------+-----------------+
-                    |                                   |
-                    v                                   v
-              Dense Embedding                    Sparse Vector
-                    |                                   |
-                    +-----------------+-----------------+
-                                      |
-                                      v
-                                   Qdrant
-                                      |
-                                      v
-                          Dense / Sparse retrieval
-                                      |
-                                      v
-                                    RRF
-                                      |
-                                      v
-                                  Reranker
-                                      |
-                                      v
-                             Generation + citations
-                                      |
-                                      v
-                                   FastAPI
+   (章节级上下文)              (fragments 字符溯源)
+         |                             |
+         |              +--------------+--------------+
+         |              |                             |
+         |              v                             v
+         |       Dense Embedding               Sparse BM25
+         |              |                             |
+         |              +--------------+--------------+
+         |                             |
+         |                             v
+         |                          Qdrant
+         |              (dense/sparse 共享同一 point_id)
+         |                             |
+         |                             v
+         |                  Dense top-k + Sparse top-k
+         |                             |
+         |                             v
+         |                        RRF 融合
+         |                     (在 candidate_k 深度)
+         |                             |
+         |                             v
+         |                         Reranker
+         |                             |
+         |                             v
+         |                    Generation + citations
+         |                             |
+         |                             v
+         |                          FastAPI
+         |
+         +---> 按需扩展 parent(未实现)
 ```
+
+### 3.1 架构的三个关键设计决策
+
+**① 统一中间表示优先**
+
+不论输入是 HTML、PDF 还是 Markdown,Parser 的唯一职责是产出
+`DocumentBlock[]`。后续所有环节(清洗/质量/切块/索引/引用)**只认识 Block**,
+不再关心原始格式。
+
+收益:cleaner 不需要按格式拆分(规划设想的是 `cleaners/html.py`、
+`cleaners/pdf.py` 各写一个,实际收敛成一个 `cleaner.py`)。
+
+**② 双路 HTML 择优(规划未提及的实现)**
+
+`html.py:84-102` 不是"Trafilatura 首选、Readability 备选"的串行回退,
+而是**两条路都跑,再比 heading 数量择优**:
+
+```python
+if readability_headings > trafilatura_headings and len(readability_markdown) >= minimum_chars:
+    markdown = readability_markdown
+    parser = "readability_structured"
+else:
+    markdown = trafilatura_markdown
+    parser = "trafilatura"
+```
+
+实测 10 篇呈**稳定分化**:
+
+```text
+readability_structured  7 篇  (全部 Anthropic, 标题层级丰富)
+trafilatura             3 篇  (全部 OpenAI, 结构扁平)
+```
+
+判据选"heading 数量"的理由:标题层级是 `section_path` 的来源,
+而 `section_path` 又是切块的硬边界依据 —— 标题保留得越全,下游结构越好。
+
+**③ 切块自主可控(偏离规划)**
+
+规划第 25 行原写"后续仍由 LlamaIndex 负责 chunking",
+实际由自建的 `BlockAwareHierarchicalChunkBuilder`(`chunker.py`,451 行)承担。
+LlamaIndex 仅被降级使用 `SentenceSplitter` 一个组件做句子级切分。
+
+后果:改切块策略改的是 `chunker.py`,不是 LlamaIndex 配置。
+详见 `docs/plan_vs_implementation.md` 偏差 A。
+
+### 3.2 数据流上的三层分工
+
+```text
+Parser          负责尽量正确地把格式转成 Block
+Block Cleaner   负责修复和规范化 Block
+Chunk Builder   负责把 Block 组织成检索单元
+Index Quality Gate  负责决定 Chunk 是否进入 dense/sparse
+RAG pipeline    负责同一 chunk_id 的 dense/sparse/RRF/rerank/generation
+```
+
+**边界一句话:Block 管"结构",Chunk 管"检索",两者不能混。**
 
 ## 4. 核心数据模型
 

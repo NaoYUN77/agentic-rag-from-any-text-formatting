@@ -1,6 +1,6 @@
 # Agentic RAG from Any Text Formatting
 
-> 面向多格式文档的 RAG 工程实践: 文档摄取、LlamaIndex 分块、Dense/Sparse 混合召回、RRF、Rerank、答案生成与引用。
+> 面向多格式文档的 RAG 工程实践: 文档摄取、Block-aware 分块、Dense/Sparse 混合召回、RRF、Rerank、答案生成与引用。
 >
 > 仓库: <https://github.com/NaoYUN77/agentic-rag-from-any-text-formatting>
 >
@@ -13,19 +13,45 @@
 已实现:
 
 ```text
-PDF / Markdown 文档摄取
-URL / HTML 摄取 (Trafilatura + 代码块补强)
-基础格式路由器 (URL/HTML/Markdown/PDF/plain text)
-Raw Parse Quality Gate + Index Decision
-Block-aware Hierarchical ChunkBuilder (Parent/Leaf + fragments + overlap)
-固定长度 + overlap + 边界语义微调的 LlamaIndex NodeParser
-Dense 向量检索 (qwen3-vl-embedding, 1024 维)
-Sparse 检索 (jieba + BM25 + Qdrant sparse vector)
-Hybrid 检索 (Dense + Sparse + RRF)
-Rerank (gte-rerank-v2)
-答案生成 + [C1] 引用 (qwen-turbo / qwen-plus)
-FastAPI 服务与 Web 检索界面
-实验输出、工程记录和问题清单
+[摄取层] 多格式路由
+  PDF (magic bytes) / URL / HTML / Markdown / plain text
+  格式判定: MIME + 文件头 magic bytes, 不依赖扩展名
+
+[摄取层] 统一中间表示 (架构基石)
+  DocumentArtifact / DocumentBlock[]
+  7 种 block 类型: text / heading / list / code / formula / table / image
+  block 字段: block_id / order / section_path / parent_id / quality_score
+
+[摄取层] HTML 双路择优 (非串行回退)
+  同时跑 trafilatura + readability, 按标题数择优
+  parser 命名: readability_structured (择优胜出) / readability_fallback (trafilatura 全败)
+  代码块补强: 从原始 HTML 提取 <pre><code> 补齐丢失代码
+
+[摄取层] 两级质量门控
+  Raw Parse Quality Gate -> 决定是否换 parser
+  Index Quality Gate     -> 决定 dense / sparse 准入
+  分级: high >= 0.85 / medium >= 0.60 / low >= 0.35 / else reject
+
+[分块层] Block-aware Hierarchical ChunkBuilder (自建, 非 LlamaIndex)
+  ATOMIC_TYPES 原子块不切: code / formula / table / image
+  MERGEABLE_TYPES 可合并: heading / text / list
+  ParentNode (单 parent 多 child) / IndexReadyChunk
+  fragments 字符级溯源: fragment.text == block.text[start:end]
+  overlap 回填: 二分查找尾部切片, 不切断句子
+
+[索引层] Dense + Sparse 双通道
+  Dense: qwen3-vl-embedding (1024 维)
+  Sparse: jieba + BM25 + Qdrant sparse vector
+  稳定映射: dense / sparse 共用 point_id (blake2b(chunk_id))
+
+[检索层] Hybrid 检索
+  Dense + Sparse 并行召回 -> RRF 融合 (在 candidate_k 深度) -> gte-rerank-v2
+
+[生成层] 答案 + 引用
+  retrieval context -> qwen-turbo / qwen-plus -> [C1] 引用标注
+
+[服务层] FastAPI + Web 检索界面
+[工程层] 实验输出、工程记录、问题清单与复现命令
 ```
 
 规划中:
@@ -45,70 +71,101 @@ OCR 置信度评分与低质量内容降权
 URL / PDF / Scan / HTML / Markdown / Office
                     |
                     v
-              Format Router                 [规划中]
+              Source Loader
+        (local file / HTTP fetch)
+                    |
+                    v
+              Format Router
+        MIME + magic bytes 判定
                     |
         +-----------+-----------+
         |           |           |
         v           v           v
-     HTML       PDF/Scan      Office
+     HTML        PDF/Scan      Office
         |           |           |
-        v           v           v
-  Trafilatura  MinerU/Docling  MarkItDown
-        +-----------+-----------+
-                    |
-                    v
-          DocumentBlock JSON               [Phase 0]
-                    |
-                    v
-        Cleaning / Normalization
-                    |
-        +-----------+-----------+
-        |                       |
-        v                       v
-Block-aware Builder     LlamaIndex NodeParser
-  [Phase 0, CLI]          [current online]
-        |                       |
-        v                       v
-Parent / IndexReadyChunk      Chunk
-        |                       |
-        +-----------+-----------+
-                    |
-                    v
-                    |
-          +---------+---------+
-          |                   |
-          v                   v
-   Dense Embedding       Sparse / BM25
-          |                   |
-          +---------+---------+
-                    |
-                    v
-              Qdrant Index
-                    |
-                    v
-              RRF -> Rerank
-                    |
-                    v
-      Answer + Citations -> FastAPI / Web
+        |     +-----+-----+     |
+        |     v           v     v
+        |  MinerU    Docling  MarkItDown      [规划中]
+        v  / pdf    / docling
+  parse_html()
+  trafilatura + readability
+   双路并行 -> 按标题数择优
+        |
+        v
+  DocumentArtifact / DocumentBlock[]           [统一中间表示]
+        |   7 种 block: text/heading/list/code/formula/table/image
+        |
+        v
+  Raw Parse Quality Gate
+        |   quality < 阈值 -> 换 parser 重试
+        v
+  clean_blocks()  (按类型归一化 / 丢样板与重复 / 重排 order)
+        |
+        v
+  Index Quality Gate  ->  dense / sparse 准入
+        |
+        v
+  BlockAwareHierarchicalChunkBuilder           [自建, 非 LlamaIndex]
+        |  ATOMIC 不切 / MERGEABLE 合并 / fragments 字符溯源
+        |
+        +---------------+---------------+
+        |                               |
+        v                               v
+   ParentNode                    IndexReadyChunk
+   (context 聚合)                 (检索单元)
+        |                               |
+        |   [Parent expansion 未实现]     |
+        |                               |
+        +---------------+---------------+
+                        |
+                        v
+                +-------+-------+
+                |               |
+                v               v
+       Dense Embedding     Sparse / BM25
+    qwen3-vl-embedding     jieba + BM25
+                |               |
+                +-------+-------+
+                        |
+                        v
+                  Qdrant Index
+          dense / sparse 共用 point_id
+                        |
+                        v
+                    RRF -> Rerank
+              (candidate_k 深度) (gte-rerank-v2)
+                        |
+                        v
+              Answer + Citations -> FastAPI / Web
 ```
 
-> 当前状态：Phase 0 的 `ParentNode + IndexReadyChunk` 已可通过 `ingest.qdrant_indexer` 写入独立 Qdrant collection。在线服务默认仍使用旧的 `LlamaIndex FixedSemanticNodeParser`，可通过环境变量切换到 Phase 0 索引。
+> Phase 0 的 `ParentNode + IndexReadyChunk` 已可通过 `ingest.qdrant_indexer` 写入独立 Qdrant collection（`phase0_dense` / `phase0_sparse`）。在线服务默认仍走旧的 LlamaIndex `FixedSemanticNodeParser` 索引，可通过环境变量切换到 Phase 0 索引。
+>
+> 详见 [架构与实现差异对照](docs/plan_vs_implementation.md) 与 [Block 结构与 block 化](docs/block_structure_and_blockification.md)。
 
 
-## 当前在线索引状态（旧链路）
+## 当前 Phase 0 索引状态
 
 ```text
-Chunker          LlamaIndex FixedSemanticNodeParser
-chunk_size       800 token
-chunk_overlap    400 token
-window_size      400 token
+语料             10 篇 (Red Hat / NGINX / Anthropic / OpenAI 等)
+Blocks           644 个 (text 466 / heading 95 / image 32 / list 30 / code 21)
+Chunks           129 个 IndexReadyChunk
+Parents          17 个 ParentNode
+Dense points     129
+Sparse points    123
+BM25 vocab       4267
 
-Red Hat chunks   42
-NGINX chunks     312
-总 chunks        354
-dense points     354
-sparse points    354
+Chunker          BlockAwareHierarchicalChunkBuilder
+chunk_tokens     800
+overlap_tokens   400
+window_tokens    400  (注: 尚未接入 embedding 语义边界)
+candidate_k      20
+rrf_k            60
+final_top_k      5
+BM25             k1=1.2, b=0.75
 ```
+
+> `window_tokens` 目前对语义边界**无实际作用**——`_split_text_block()` 走的是 `SentenceSplitter` 的句子边界，没有 embedding 距离判定。这是 Phase 0 的已知未闭环项。
 
 公开仓库不包含第三方 PDF 和完整 Markdown 语料。语料、Qdrant 数据、索引产物和 API Key 均被 `.gitignore` 排除。
 
@@ -237,6 +294,8 @@ pipeline/    实现与数据  "代码在哪、环境在哪、数据在哪"
 | `format_routing_and_cleaning_plan.md` | 规划文档 | **格式路由计划** | URL/HTML/PDF/扫描件/代码/公式/图片/OCR 质量门控 | 方案设计 |
 | `ingest_pipeline_progress.md` | 289 行 | **当前进度** | Phase 0 实现、验证数据、风险和下一步 | 代码 + 测试 + CLI 实测 |
 | `block_aware_chunking_implementation.md` | 实现说明 | **当前切块实现** | Block -> Piece -> Chunk、overlap、fragments、Dense/Sparse Qdrant | 当前代码 + 9 个测试 + E2E |
+| `block_structure_and_blockification.md` | 概念文档 | **Block 结构与 block 化** | 数据结构 / 7 种 block / heading 状态机 / section_path / 清洁与门控 / 实测数据 / 工程结论 | 源码 + 真实产物 |
+| `plan_vs_implementation.md` | 对齐文档 | **规划 vs 实现差异对照** | 3 处重大偏差 + 8 条设计目标逐条核对 + 8 条核心不变量 + 修订建议 | 规划文档 + 当前代码 |
 
 **推荐阅读顺序:**
 
@@ -254,6 +313,8 @@ A. 新 Agent 接手 -> project_overview_for_agents.md
 9. 查看当前进度    -> ingest_pipeline_progress.md
 10. 想看切块实现   -> block_aware_chunking_implementation.md
 11. 搞懂 Top-K       -> top_k_and_candidate_depth.md
+12. 搞懂 Block 结构  -> block_structure_and_blockification.md
+13. 规划与实现对齐   -> plan_vs_implementation.md
 ```
 
 ---
@@ -332,8 +393,8 @@ pipeline\
 │       └── 11_llamaindex_rebuild.md
 │
 ├── backups\                索引与 sidecar 备份
-├── index_artifacts\        当前 354 chunks 的 vocab / BM25 / postings
-└── qdrant_data\            当前 354 dense + 354 sparse
+├── index_artifacts\        Phase 0 索引产物 (vocab / BM25 / postings)
+└── qdrant_data\            Phase 0: 129 dense + 123 sparse
 ```
 
 ### 环境

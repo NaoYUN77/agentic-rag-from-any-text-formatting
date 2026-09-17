@@ -1,5 +1,25 @@
 # 格式路由与格式清洗方案
 
+> ⚠️ **本文是设计史料(写于旧 LlamaIndex 链路时代),部分内容已过时。**
+>
+> **分层思想(多格式 → 各自 parser → 统一 Block → 质量门 → 切块 → 同 chunk_id 检索)
+> 仍然有效且已实现。** 但凡涉及以下内容的段落,请以
+> `docs/plan_vs_implementation.md`(**规划与实现对照表**)为准:
+>
+> ```text
+> 看到 "LlamaIndex NodeParser"      → 读作 BlockAwareHierarchicalChunkBuilder(自建)
+> 看到 "cleaners/ 目录"             → 实际不存在,只有单个 cleaner.py
+> 看到 "block_ids"                  → 读作 fragments(block_id, start_char, end_char)
+> 看到 "window_tokens 语义微调"      → 实际未实现
+> 看到 "RawDocumentArtifact"        → 实际叫 DocumentArtifact
+> ```
+>
+> 明确过时的位置:**第 25 行**(设计目标 7)、**第 95 行**(架构图)、
+> **第 202 行**(block_ids 示例)、**第 1332-1351 行**(目录规划)、
+> **第 1375 行**(验收标准 8)。
+>
+> 核对时间:2026-09-17
+
 > 目标: 把 URL/HTML、中文 PDF、英文 PDF、扫描件和 Markdown 统一成
 > 可追溯、可质量评估、可被 LlamaIndex 继续切分和检索的文档结构。
 >
@@ -25,6 +45,15 @@
 7. 后续仍由 LlamaIndex 负责 chunking
 8. 每个结论都能追溯来源、页码、section 和 parser
 ```
+
+> ⚠️ **【目标 7 已过时】** 实际由自建的 `BlockAwareHierarchicalChunkBuilder`
+> (`pipeline/ingest/chunker.py`,451 行) 承担全部切块逻辑。
+> LlamaIndex 仅被降级使用 `SentenceSplitter` 一个组件,负责长文本块内部的句子级切分。
+> 详见 `docs/plan_vs_implementation.md` 偏差 A。
+>
+> ⚠️ **【目标 4、5、8 部分未达成】** 图片仅存 URI(caption 多为空);
+> 扫描件 OCR 链路未实现(`ocr_confidence` 全为 None);
+> page/bbox 在当前 URL 语料中全为 None。
 
 非目标:
 
@@ -119,6 +148,18 @@ IndexReadyChunk
     同一 chunk_id 下的 dense_text / sparse_text / full_text
 ```
 
+> ⚠️ **【此架构图已过时】** 对应关系:
+>
+> ```text
+> "LlamaIndex NodeParser"  → 实际是 BlockAwareHierarchicalChunkBuilder(自建, chunker.py)
+> "Block Cleaner"          → 实际是 cleaner.py 的 clean_blocks()
+> "CleanDocumentArtifact"  → 实际没有独立类型,复用 DocumentArtifact
+> "RawDocumentArtifact"    → 实际叫 DocumentArtifact
+> ```
+>
+> 实际链路在切块后还多出一级 **ParentNode**(章节级父节点),架构图未体现。
+> 完整实况见 `docs/project_overview_for_agents.md` 第 3 节。
+
 ---
 
 ## 二点一、Block 和 Chunk 的关系
@@ -194,6 +235,10 @@ B4 同时属于 C02 和 C03
 ```
 
 ### 推荐 Chunk 结构
+
+> ⚠️ **【此示例的 `block_ids` 已被下文第 271 行否定】**
+> 实际字段是 `fragments`,元素为 `{block_id, start_char, end_char, block_type, text}`。
+> 详见 `docs/plan_vs_implementation.md` 偏差 C。
 
 ```json
 {
@@ -1350,6 +1395,33 @@ pipeline/ingest/
     └── blocks.py
 ```
 
+> ⚠️ **【此目录规划与实际不符】** 实际结构:
+>
+> ```text
+> pipeline/ingest/
+> ├── models.py                    ✅
+> ├── router.py                    ✅
+> ├── source.py                    ✅
+> ├── quality.py                   ✅
+> ├── parser_registry.py           ➕ 计划外
+> ├── pipeline.py                  ➕ 计划外(IngestPipeline 编排)
+> ├── chunker.py                   ➕ 计划外(BlockAwareHierarchicalChunkBuilder)
+> ├── cleaner.py                   ⚠️ 单文件, 不是 cleaners/ 目录
+> ├── qdrant_indexer.py            ➕ 计划外
+> └── parsers/
+>     ├── html.py                  ← 规划叫 html_trafilatura.py
+>     ├── markdown.py              ✅
+>     ├── plain.py                 ➕ 计划外
+>     ├── pdf_mineru.py            ✅
+>     ├── pdf_pymupdf.py           ➕ 计划外
+>     ├── docling_optional.py      ⚠️ 仅接口壳, 抛 NotImplementedError
+>     └── office_optional.py       ⚠️ 仅接口壳, 抛 NotImplementedError
+> ```
+>
+> **关键变化:cleaner 没有按格式拆分。** 因为 Block 化之后所有格式已是同一种表示,
+> 清洗不再需要知道原始格式 —— 这是 Block 抽象的收益。
+> 详见 `docs/plan_vs_implementation.md` 偏差 B。
+
 解析器统一接口:
 
 ```python
@@ -1374,3 +1446,18 @@ class Parser:
 7. 同一 chunk 的 dense/sparse 共享 chunk_id
 8. 后续能把这些 block 继续交给 LlamaIndex NodeParser
 ```
+
+> ⚠️ **【本节的验收状态(2026-09-17 核对)】**
+>
+> | # | 标准 | 状态 |
+> |---|---|---|
+> | 1 | 扫描件识别 + 置信度 | ❌ 未实现,`ocr_confidence` 全为 None |
+> | 2 | HTML 代码块保留 | ✅ 已实现,且额外有 BeautifulSoup 补充机制 |
+> | 3 | 公式保留 LaTeX | ⚠️ 解析器有 formula 分支,当前语料未出现实例 |
+> | 4 | 图片不丢失 | ⚠️ 仅保留 URI,caption 多为空,assets 恒为空 |
+> | 5 | 低质量 OCR 不进 sparse | ⚠️ 决策机制已实现(`quality.py:89`),当前语料全为 high 未触发 |
+> | 6 | block 有 source/page/section/parser | ⚠️ source/section/parser ✅;**page 全为 None** |
+> | 7 | dense/sparse 共享 chunk_id | ✅ 已实现(blake2b 稳定 point_id) |
+> | 8 | 交给 LlamaIndex NodeParser | ❌ **已偏离**,改为自建 ChunkBuilder |
+>
+> 详见 `docs/plan_vs_implementation.md` 第 3 节。

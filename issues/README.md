@@ -26,6 +26,7 @@
 | 05 | 元数据层 | section / page 质量差, 过滤和引用都不可靠 | P1 | 部分已修复 |
 | 06 | 分块层 | 块跨章节, 导致主题混淆(查 Keepalived 召回 HAProxy) | **P0** | **已修复** |
 | 07 | 解析层 | PDF 代码块被误判为标题, section 噪声严重 | P1 | 待解决 |
+| 08 | 解析层 | HTML 补充代码块位置错乱, section 归属丢失 | P2 | 潜伏(未触发) |
 
 ### 修复记录
 
@@ -88,5 +89,8 @@ P2  难度高或收益不确定
 | `03_representation_layer.md` | 嵌入压缩、主题稀释、相似度分辨率 |
 | `04_channel_layer.md` | 缺关键词通道、精确匹配弱 |
 | `05_metadata.md` | section 提取、page 估算、过滤可用性 |
+| `06_chunk_cross_section.md` | 块跨章节、顶层章节硬边界分块 |
+| `07_pdf_section_noise.md` | PDF 代码块误判为标题 |
+| `08_html_code_supplement_placement.md` | HTML 补充代码块位置错乱、section 归属丢失 |
 
 
