@@ -126,10 +126,20 @@ class Hit(BaseModel):
     text: str
     file_name: Optional[str] = None
     page: Optional[int] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
     section: Optional[str] = None
+    section_path: List[str] = Field(default_factory=list)
     chunk_index: Optional[int] = None
     char_count: Optional[int] = None
     n_sentences: Optional[int] = None
+    # 单句检索单元: unit_kind="sentence" 时, window_text 是 metadata 里的
+    # 前后文窗口(不进 embedding), bbox 用于原文高亮
+    unit_kind: Optional[str] = None
+    window_text: Optional[str] = None
+    bbox: Optional[List[float]] = None
+    # 块级来源 URL（HTML 路径填入），用于"这段来自哪个页面"的引用
+    url: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
@@ -218,8 +228,16 @@ def _to_hit(p, rank: int, mode: str) -> Hit:
         text=pl.get("text", ""),
         file_name=pl.get("file_name"),
         page=pl.get("page"),
+        page_start=pl.get("page_start"),
+        page_end=pl.get("page_end"),
         section=pl.get("section"),
+        section_path=pl.get("section_path") or [],
         chunk_index=pl.get("chunk_index"),
+        # 单句策略: 检索命中单句后取这些字段拼上下文与做引用定位
+        unit_kind=pl.get("unit_kind"),
+        window_text=pl.get("window_text"),
+        bbox=pl.get("bbox"),
+        url=pl.get("url"),
         char_count=pl.get("char_count"),
         n_sentences=pl.get("n_sentences"),
     )
@@ -358,7 +376,7 @@ def info() -> Dict[str, Any]:
         "vector_size": c.config.params.vectors.size,
         "distance": str(c.config.params.vectors.distance),
         "qdrant_path": QDRANT_PATH,
-        "model": "qwen3-vl-embedding",
+        "model": getattr(_state.get("embeddings"), "model", None) or "unknown",
         "chat_model": _state.get("generator").model if _state.get("generator") else None,
         "rerank_model": _state.get("reranker").model if _state.get("reranker") else None,
         "mode": "hybrid + RRF",

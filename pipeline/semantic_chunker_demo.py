@@ -146,6 +146,100 @@ QWEN_MULTIMODAL_ENDPOINT = (
     "multimodal-embedding/multimodal-embedding"
 )
 
+# 通用文本向量原生接口（与多模态接口是两个不同的 endpoint）。
+QWEN_TEXT_EMBED_ENDPOINT = (
+    "https://dashscope.aliyuncs.com/api/v1/services/embeddings/"
+    "text-embedding/text-embedding"
+)
+
+
+class QwenTextEmbeddings(Embeddings):
+    """阿里云百炼 qwen3.7-text-embedding 的文本嵌入封装。
+
+    走百炼「通用文本向量」原生接口：
+
+        POST /api/v1/services/embeddings/text-embedding/text-embedding
+
+    与 `QwenVLEmbeddings`（多模态接口）的区别（**接口不同, 不能只换模型名**）：
+
+    - 请求体 `input` 是 `{"texts": [...]}`，不是 `{"contents": [{"text": ...}]}`
+    - 响应字段是 `output.embeddings[].text_index`，不是 `.index`
+    - 支持 `text_type` = `query` / `document`（非对称检索：入库用 document，
+      检索用 query，官方建议这样区分能提升效果）
+    - 单次最多 20 条（qwen3.7-text-embedding），单条最长 128K token
+
+    参数：
+        dimension: qwen3.7-text-embedding 支持 2560/2048/1536/1024(默认)/768/512/256
+        instruct:  可选任务说明（仅 text_type=query 时生效），建议英文
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "qwen3.7-text-embedding",
+        dimension: int = 1024,
+        instruct: str | None = None,
+        api_url: str = QWEN_TEXT_EMBED_ENDPOINT,
+        batch_size: int = 20,
+        timeout: float = 60.0,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.dimension = dimension
+        self.instruct = instruct
+        self.api_url = api_url
+        self.batch_size = max(1, batch_size)
+        self.timeout = timeout
+        # 缓存按 (text_type, text) 分键 —— 同一段文本作为 query / document
+        # 可能得到不同向量，不能混用。
+        self._cache: dict = {}
+
+    def _call(self, texts: Sequence[str], text_type: str) -> List[List[float]]:
+        parameters: dict = {"dimension": self.dimension, "output_type": "dense"}
+        parameters["text_type"] = text_type
+        if self.instruct and text_type == "query":
+            parameters["instruct"] = self.instruct
+        payload = {
+            "model": self.model,
+            "input": {"texts": list(texts)},
+            "parameters": parameters,
+        }
+        resp = requests.post(
+            self.api_url,
+            headers={
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=self.timeout,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                "百炼文本向量接口返回 %s: %s" % (resp.status_code, resp.text[:500])
+            )
+        embeddings = resp.json()["output"]["embeddings"]
+        embeddings.sort(key=lambda e: e["text_index"])
+        return [e["embedding"] for e in embeddings]
+
+    def _embed_texts(self, texts: Sequence[str], text_type: str) -> List[List[float]]:
+        keys = [(text_type, t) for t in dict.fromkeys(texts)]
+        missing = [t for (tt, t) in keys if (tt, t) not in self._cache]
+        for start in range(0, len(missing), self.batch_size):
+            batch = missing[start : start + self.batch_size]
+            vectors = self._call(batch, text_type)
+            if len(vectors) != len(batch):
+                # 数量对不上时退化为逐条，保证一定能跑通。
+                vectors = [self._call([t], text_type)[0] for t in batch]
+            for t, v in zip(batch, vectors):
+                self._cache[(text_type, t)] = v
+        return [self._cache[(text_type, t)] for t in texts]
+
+    def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
+        return self._embed_texts(texts, "document")
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed_texts([text], "query")[0]
+
 
 class QwenVLEmbeddings(Embeddings):
     """阿里云百炼 qwen3-vl-embedding 的文本嵌入封装。
@@ -248,9 +342,9 @@ def build_embeddings(backend: str) -> Embeddings:
                 "缺少 DASHSCOPE_API_KEY 环境变量, 请先设置:\n"
                 '  $env:DASHSCOPE_API_KEY="sk-你的百炼Key"'
             )
-        return QwenVLEmbeddings(
+        return QwenTextEmbeddings(
             api_key=api_key,
-            model=os.getenv("QWEN_EMBED_MODEL", "qwen3-vl-embedding"),
+            model=os.getenv("QWEN_EMBED_MODEL", "qwen3.7-text-embedding"),
             dimension=int(os.getenv("QWEN_EMBED_DIM", "1024")),
             instruct=os.getenv("QWEN_EMBED_INSTRUCT") or None,
         )

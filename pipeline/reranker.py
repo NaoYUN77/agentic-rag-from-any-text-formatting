@@ -20,7 +20,7 @@ class DashScopeReranker:
     def __init__(
         self,
         api_key: str,
-        model: str = "gte-rerank-v2",
+        model: str = "qwen3.7-text-rerank",
         api_url: str = DEFAULT_RERANK_URL,
         timeout: float = 60.0,
     ) -> None:
@@ -36,7 +36,7 @@ class DashScopeReranker:
             raise RuntimeError("缺少 DASHSCOPE_API_KEY, 无法初始化 reranker")
         return cls(
             api_key=api_key,
-            model=os.getenv("QWEN_RERANK_MODEL", "gte-rerank-v2"),
+            model=os.getenv("QWEN_RERANK_MODEL", "qwen3.7-text-rerank"),
             api_url=os.getenv("QWEN_RERANK_API_URL", DEFAULT_RERANK_URL),
             timeout=float(os.getenv("QWEN_RERANK_TIMEOUT", "60")),
         )
