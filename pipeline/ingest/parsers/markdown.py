@@ -3,10 +3,9 @@ r"""Markdown / plain text -> DocumentArtifact。"""
 from __future__ import annotations
 
 import re
-import uuid
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
-from ..models import DocumentArtifact, DocumentBlock, SourcePayload
+from ..models import DocumentArtifact, DocumentBlock, SourcePayload, stable_artifact_id
 
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -29,10 +28,14 @@ def infer_language(text: str) -> str:
 def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdown") -> DocumentArtifact:
     lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
     blocks: List[DocumentBlock] = []
-    heading_stack: List[str] = []
+    heading_stack: List[Tuple[int, str]] = []
     current_parent: Optional[str] = None
     paragraph: List[str] = []
     order = 0
+    # 与 html / plain 路径保持一致: block 级 url 从 final_uri 取。
+    # 之前这里压根没赋 url, 导致走 markdown 回退的文档 block.url 全是 None,
+    # 引用展示时无法给出"这段话出自哪个 URL"。
+    url = source.final_uri or source.uri or None
 
     def next_id() -> str:
         return f"b{order:04d}"
@@ -56,8 +59,9 @@ def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdow
                 markdown=raw,
                 latex=raw[2:-2].strip(),
                 parent_id=current_parent,
-                section_path=list(heading_stack),
+                section_path=[t for _, t in heading_stack],
                 order=order,
+                url=url,
             ))
             return
 
@@ -71,8 +75,9 @@ def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdow
                 caption=img.group(1) or None,
                 image_uri=img.group(2),
                 parent_id=current_parent,
-                section_path=list(heading_stack),
+                section_path=[t for _, t in heading_stack],
                 order=order,
+                url=url,
             ))
             return
 
@@ -83,8 +88,9 @@ def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdow
             text=raw,
             markdown=raw,
             parent_id=current_parent,
-            section_path=list(heading_stack),
+            section_path=[t for _, t in heading_stack],
             order=order,
+            url=url,
         ))
 
     i = 0
@@ -110,8 +116,9 @@ def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdow
                 markdown=f"```{language or ''}\n{code}\n```",
                 code_language=language,
                 parent_id=current_parent,
-                section_path=list(heading_stack),
+                section_path=[t for _, t in heading_stack],
                 order=order,
+                url=url,
             ))
             continue
 
@@ -120,9 +127,13 @@ def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdow
             flush_paragraph()
             level = len(heading.group(1))
             title = heading.group(2).strip()
-            while len(heading_stack) >= level:
+            # 用 level 比较(不是栈深): 同级标题必须互斥。
+            # 历史 bug (2026-09-20 修复, 与 html.py / pdf_common 同一类):
+            # 旧写法 `while len(heading_stack) >= level` 拿"栈深度"和"层级"相比,
+            # 栈长 1、level 2 时 `1 >= 2` 为假 → 同级标题被 append 成子节点。
+            while heading_stack and heading_stack[-1][0] >= level:
                 heading_stack.pop()
-            heading_stack.append(title)
+            heading_stack.append((level, title))
             order += 1
             block_id = next_id()
             blocks.append(DocumentBlock(
@@ -131,8 +142,9 @@ def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdow
                 text=title,
                 markdown=line,
                 parent_id=None,
-                section_path=list(heading_stack[:-1]),
+                section_path=[t for _, t in heading_stack[:-1]],
                 order=order,
+                url=url,
                 metadata={"level": level},
             ))
             current_parent = block_id
@@ -151,7 +163,7 @@ def parse_markdown_text(text: str, source: SourcePayload, parser: str = "markdow
         title = next((b.text for b in blocks if b.type == "heading"), None)
     artifact = DocumentArtifact(
         schema_version="1.0",
-        artifact_id=f"doc_{uuid.uuid4().hex[:12]}",
+        artifact_id=stable_artifact_id(source),
         source_uri=source.final_uri,
         source_type=source.source_type,
         mime_type=source.mime_type,

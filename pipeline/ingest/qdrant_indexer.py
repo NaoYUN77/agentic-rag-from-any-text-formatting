@@ -186,17 +186,55 @@ def _section_path(chunk: Mapping[str, Any]) -> List[str]:
     return [str(item) for item in value if str(item).strip()]
 
 
+def _slim_fragments(fragments: Any) -> List[Dict[str, Any]]:
+    """payload 里只保留 fragment 的**定位信息**, 丢掉 text。
+
+    fragment.text 是 chunk 正文的再一份拷贝 —— 实测 fragments 的 JSON 字节数
+    是 full_text 的 225%(每个 fragment 带 7 个键, 开销远超文本本身)。
+    引用只需要 block_id 与坐标, 不需要重复的文本。
+
+    注意: chunks.jsonl 里的 fragments 仍保留完整信息(评估的 gold 反查要用)。
+    这里只精简**存进向量库的那一份**。
+    """
+    out: List[Dict[str, Any]] = []
+    for fr in fragments or []:
+        if not isinstance(fr, Mapping):
+            continue
+        out.append({
+            "block_id": fr.get("block_id"),
+            "start_char": fr.get("start_char"),
+            "end_char": fr.get("end_char"),
+            "block_type": fr.get("block_type"),
+            "page": fr.get("page"),
+            "bbox": fr.get("bbox"),
+        })
+    return out
+
+
 def _chunk_payload(
     chunk: Mapping[str, Any],
     artifact: Mapping[str, Any],
     chunk_index: int,
 ) -> Dict[str, Any]:
+    """构建**存进向量库**的 payload。
+
+    原则: 只放"检索与引用需要的"字段。
+
+    刻意不放的三类:
+      - dense_text —— 旧字段, 与 text(=full_text) 100% 相同, 纯冗余, 已删除。
+        检索侧只嵌 full_text, 不再有 dense_text 概念。
+      - sparse_text —— 只用于建索引时的 BM25 向量化, 检索侧零读取。
+      - fragments[].text —— 见 _slim_fragments。
+      - quality / index_decision —— 建索引阶段的决策痕迹, 检索时不用。
+
+    这些字段在 chunks.jsonl 里都完整保留, 需要时从产物文件读。
+    """
     section_path = _section_path(chunk)
     section = " > ".join(section_path)
     page_start = chunk.get("page_start")
     page_end = chunk.get("page_end")
     full_text = str(chunk.get("full_text") or "").strip()
-    decision = chunk.get("index_decision") or {}
+    chunk_meta = chunk.get("metadata") or {}
 
     return {
         "chunk_id": str(chunk.get("chunk_id") or ""),
@@ -218,12 +256,22 @@ def _chunk_payload(
         "token_count": int(chunk.get("token_count") or 0),
         "char_count": int(chunk.get("char_count") or len(full_text)),
         "text": full_text,
-        "dense_text": str(chunk.get("dense_text") or full_text).strip(),
-        "sparse_text": str(chunk.get("sparse_text") or "").strip(),
-        "fragments": chunk.get("fragments") or [],
-        "quality": chunk.get("quality"),
-        "index_decision": decision,
-        "overlap_from_previous": int(chunk.get("overlap_from_previous") or 0),
+        "fragments": _slim_fragments(chunk.get("fragments")),
+        # 块级来源 URL（HTML 路径填入）。与 source_uri 的区别:
+        # source_uri 是整篇文档的入口, url 是这一块的来源页 ——
+        # 当一篇文档由多个页面聚合而成时两者不同。
+        "url": chunk_meta.get("url") or artifact.get("source_uri"),
+        # 本 chunk 覆盖的标题清单（heading 已从正文剥离后, 这里保留用于
+        # 给 LLM 补背景 —— generation.build_context 据此拼"本段含小节"）。
+        # 旧 chunks.jsonl 无此字段时为 None, 生成侧优雅降级。
+        "headings": chunk_meta.get("headings"),
+        # ---- 单句策略的引用与上下文 ----
+        # 检索命中后取这些字段拼上下文与做引用定位。
+        # 刻意不进 embedding: dense 只嵌正文, 引用信息不污染向量。
+        "unit_kind": chunk_meta.get("unit_kind"),
+        "window_text": chunk_meta.get("window_text"),
+        "window_token_count": chunk_meta.get("window_token_count"),
+        "bbox": chunk_meta.get("bbox"),
     }
 
 
@@ -242,11 +290,16 @@ def build_index_plan(bundles: Iterable[ExportBundle]) -> IndexPlan:
 
             point_id = point_id_for(chunk_id)
             payload = _chunk_payload(chunk, bundle.artifact, chunk_index)
-            decision = payload.get("index_decision") or {}
+            # 建索引用的字段从 chunk 直接读 —— 它们不再进 payload
+            # （payload 只放检索与引用需要的，见 _chunk_payload）
+            decision = chunk.get("index_decision") or {}
             dense_enabled = bool(decision.get("dense_index", True))
             sparse_enabled = bool(decision.get("sparse_index", True))
-            dense_text = str(payload.get("dense_text") or payload["text"]).strip()
-            sparse_text = str(payload.get("sparse_text") or "").strip()
+            # dense 直接用 full_text（heading 已剥离后的正文）。
+            # 历史上曾有 dense_text 字段，但与 full_text 100% 相同，属冗余，
+            # 已在 chunker.IndexReadyChunk 中删除（见 issues/）。
+            dense_text = str(chunk.get("full_text") or "").strip()
+            sparse_text = str(chunk.get("sparse_text") or "").strip()
 
             if dense_enabled and dense_text:
                 previous = seen_dense.get(chunk_id)

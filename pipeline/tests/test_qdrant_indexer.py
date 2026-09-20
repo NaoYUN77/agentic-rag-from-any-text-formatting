@@ -63,7 +63,6 @@ def _chunk(
             }
         ],
         "full_text": text,
-        "dense_text": text,
         "sparse_text": sparse_text,
         "token_count": len(text.split()),
         "char_count": len(text),

@@ -2,8 +2,50 @@ r"""统一的文档摄取数据模型。"""
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
+
+
+def stable_artifact_id(source: "SourcePayload") -> str:
+    """从来源派生**确定性**的 artifact_id。
+
+    为什么不用 uuid4
+    ----------------
+    原实现 4 个 parser 都写 `f"doc_{uuid.uuid4().hex[:12]}"`, 每次重建同一份
+    语料都得到不同的 id。实测两次重建: `doc_049627f36e74` vs `doc_0e5e3c88e501`。
+
+    后果:
+      - `chunk_id = f"{artifact_id}_c{index:04d}"` 不稳定
+        → 增量更新无法对齐 (无法按 artifact 删除旧 chunk)
+        → 跨 run 无法按 chunk_id 做逐 chunk 对比
+      - 依赖 chunk_id 的历史产物 (如 eval/runs/*/per_query.jsonl) 会失效
+      - point_id 也由 chunk_id 派生 → 重建产生全新 point 而非覆盖
+
+    派生规则
+    --------
+    优先用 `final_uri` (文档身份), 无则用 `uri`, 再无则用内容 `sha256`。
+    取 sha256 前 12 位十六进制, 保持与原格式一致的 `doc_<12hex>`。
+
+    为什么优先用 URI 而不是内容哈希
+    ------------------------------
+    URI 是**文档身份**, 内容哈希是**版本指纹**。
+    用 URI 时, 换 parser / 换切块参数重建同一篇文档 → artifact_id 不变
+    → chunk_id 按位置对齐, 可以逐 chunk 对比"改了什么"。
+    若用内容哈希, 内容一变全部 id 就变, 对比只能靠全文匹配。
+
+    代价 (需要知道): 同一 URI 内容更新后 artifact_id 不变,
+    旧 chunk 不会自动消失 —— 正确的增量更新需要**按 artifact_id 删除**,
+    本函数不负责那一步。
+    """
+    basis = (source.final_uri or source.uri or "").strip()
+    if not basis:
+        basis = (source.sha256 or "").strip()
+    if not basis:
+        raise ValueError(
+            "无法派生 artifact_id: source 既无 final_uri/uri 也无 sha256"
+        )
+    return "doc_" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass
@@ -45,6 +87,10 @@ class DocumentBlock:
     order: int = 0
     page: Optional[int] = None
     bbox: Optional[List[float]] = None
+    # 来源 URL。HTML 路径填入, 用于引用时标注"这段来自哪个页面"。
+    # 与 DocumentArtifact.source_uri 的区别: 后者是整篇文档的入口,
+    # 前者是块级的来源 —— 当一篇文档由多个页面聚合而成时两者不同。
+    url: Optional[str] = None
     code_language: Optional[str] = None
     latex: Optional[str] = None
     image_uri: Optional[str] = None
