@@ -439,14 +439,15 @@ overlap
 重新切 Chunk
 ```
 
-## 9. full_text / dense_text / sparse_text
+## 9. full_text / sparse_text（dense_text 已删除）
 
 ### full_text
 
-由 Piece 对应的 Block 重新渲染：
+由 Piece 对应的 Block 重新渲染，**但 heading 默认不进正文**（见 `_render_block`
+的 `strip_headings`，默认 `True`）：
 
 ```text
-heading -> Markdown heading
+heading -> ""            (剥离! 只作 metadata, 见下)
 code    -> fenced code
 formula -> $$...$$
 image   -> Markdown image
@@ -456,34 +457,33 @@ text    -> 原文
 用途：
 
 ```text
-展示
-引用
-Parent context
+dense embedding 的输入
+展示 / 引用 / Parent context
 ```
 
-### dense_text
+heading 被剥离的理由：
 
-当前包含所有非空渲染片段：
+1. 标题是"这段来自哪一章"的**引用信息**，不是内容本身；
+   它已由 `chunk.section_path` + `section_block_id` + fragment 完整承载。
+2. 标题行的 token 占比极小（实测 1.39%，601/43109），剥掉几乎不省 token，
+   但让 chunk 正文更"纯语义"，且引用信息仍可经 metadata 还原。
+3. 纯 heading 的 chunk（如 PDF 封面标题，只有标题、无正文）会被显式丢弃
+   （`_make_chunk` 返回 `None`），不进索引。
 
-```text
-heading
-text
-list
-code
-formula
-table
-image caption
-```
+被剥离的标题去哪了？存在 `chunk.metadata.headings`
+（本 chunk 覆盖的标题清单）+ `chunk.section_path`（祖先链）。
+生成阶段 `generation.build_context` 据此拼"背景"行，让 LLM 知道
+这段属于哪一章、讲了哪几个小节 —— 详见 §9.5。
 
-用途：
+### dense_text（已删除）
 
-```text
-dense embedding
-```
+历史上 `dense_text` 与 `full_text` **100% 相同**（实测 88/88），纯冗余。
+已在 `IndexReadyChunk` 中删除；索引器现在直接用 `full_text` 生成 dense embedding
+（见 `qdrant_indexer._chunk_payload`）。`sparse_text` 同理，不再有 dense_text 概念。
 
 ### sparse_text
 
-当前只包含：
+只包含 BM25 需要的文本：
 
 ```python
 SPARSE_TYPES = {
@@ -495,25 +495,36 @@ SPARSE_TYPES = {
 }
 ```
 
-以及 image 的 caption/text。
+以及 image 的 caption/text。**从不包含 heading**（无论 `strip_headings` 与否）。
 
-heading 默认不重复进入 `sparse_text`。
+heading 不进 `sparse_text` 的原因：若每个 Chunk 都重复 `KEEPALIVED`，
+会导致 `df` 上升、`IDF` 下降、关键词区分度降低。
 
-原因是如果每个 Chunk 都重复：
+> 注意：因为 `sparse_text` 本就不含 heading，而 gold 反查只读 `fragments[].text`
+> （裸标题，不含 `#`），所以"剥离正文标题"对稀疏检索与评测**零影响**。
+
+### 9.5 生成阶段的 metadata → 背景补全
+
+正文剥离标题后，一段正文可能以"这个参数…"开头，LLM 不知道它属于哪一章。
+`generation.build_context` 用 metadata 拼一行"背景"补回来：
 
 ```text
-KEEPALIVED
-KEEPALIVED
-KEEPALIVED
+[C1] 文档: Agent Skills | 章节: The anatomy of a skill | 页码未知
+背景: 文档《Agent Skills》；章节路径: The anatomy of a skill；本段涵盖小节: The anatomy of a skill；出处: https://...
+<chunk body>
 ```
 
-会导致：
+来源字段（`generation._chunk_background`）：
 
 ```text
-df(keepalived) 上升
-IDF(keepalived) 下降
-关键词区分度降低
+title / file_name       文档名
+section_path            章节面包屑
+headings                本段覆盖的标题清单（payload 新增字段）
+url                     块级来源 URL（HTML）或 source_uri（PDF）
 ```
+
+`include_background` 默认 `True`，可关闭做 A/B。`headings` 缺失时优雅降级
+（旧 chunks.jsonl 无此字段 → 背景行为空，只用 header 行）。
 
 ## 10. Chunk 质量与索引决策
 

@@ -1406,18 +1406,23 @@ pipeline/ingest/
 > ├── parser_registry.py           ➕ 计划外
 > ├── pipeline.py                  ➕ 计划外(IngestPipeline 编排)
 > ├── chunker.py                   ➕ 计划外(BlockAwareHierarchicalChunkBuilder)
+> ├── sentence_chunker.py          ➕ 计划外(SentenceWindowChunkBuilder, A/B 并存)
 > ├── cleaner.py                   ⚠️ 单文件, 不是 cleaners/ 目录
 > ├── qdrant_indexer.py            ➕ 计划外
 > └── parsers/
 >     ├── html.py                  ← 规划叫 html_trafilatura.py
 >     ├── markdown.py              ✅
 >     ├── plain.py                 ➕ 计划外
->     ├── pdf_mineru.py            ✅
->     ├── pdf_pymupdf.py           ➕ 计划外
+>     ├── pdf_pdfplumber.py        ➕ 计划外(PDF 默认, MIT)
+>     ├── pdf_common.py            ➕ 计划外(三个 PDF adapter 共享的解析核心)
+>     ├── pdf_pymupdf.py           ➕ 计划外(AGPL 备选)
 >     ├── docling_optional.py      ⚠️ 仅接口壳, 抛 NotImplementedError
 >     └── office_optional.py       ⚠️ 仅接口壳, 抛 NotImplementedError
 > ```
 >
+> 更新 (2026-09-20)：**移除 `pdf_mineru.py`**。它是唯一经
+> `PDF → Markdown → Block` 中转的解析器，会丢页码/坐标/字号，
+> 且 heading 层级被压平（见 issues/11）；依赖外部 CLI 且有 20 页上限。
 > **关键变化:cleaner 没有按格式拆分。** 因为 Block 化之后所有格式已是同一种表示,
 > 清洗不再需要知道原始格式 —— 这是 Block 抽象的收益。
 > 详见 `docs/plan_vs_implementation.md` 偏差 B。

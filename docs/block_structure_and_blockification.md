@@ -89,12 +89,17 @@ SPARSE_TYPES   = {"text", "list", "code", "formula", "table"}  # 进 BM25(不含
 `router.py` 按优先级判断:
 
 ```
-magic bytes == %PDF-        → pdf_mineru (fallback: pdf_docling, pdf_pymupdf)
-mime 含 html 或 <html> 出现 → html_trafilatura (fallback: html_readability)
+magic bytes == %PDF-        → pdf_pdfplumber (fallback: pdf_pymupdf)
+mime 含 html 或 <html> 出现 → html_readability
 后缀 .md/.markdown          → markdown
 后缀 .txt/.rst              → plain_text
-后缀 .docx/.pptx/.xlsx      → office_optional
+后缀 .docx/.pptx/.xlsx      → office_optional（尚未接入）
 ```
+
+> 更新 (2026-09-20)：本段此前写的是 `pdf_mineru (fallback: pdf_docling, pdf_pymupdf)`
+> 与 `html_trafilatura (fallback: html_readability)`，**与实际代码不符**：
+> PDF 默认早已是 `pdf_pdfplumber`，HTML 也已统一走 `html_readability`。
+> 本次一并改正，并移除 `pdf_mineru`（唯一经 Markdown 中转的 PDF 路径）。
 
 实测 10 篇的 `parser` 字段分布,证明**同是 HTML,会走不同分支**:
 
