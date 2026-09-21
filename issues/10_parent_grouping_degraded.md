@@ -1,6 +1,34 @@
 # 问题 10: parent 分组退化, 章节级上下文实际不可用
 
-**优先级: P1**　**状态: 部分解决 —— 根因之一已修, 但 `_scope()` 设计问题仍在**
+**优先级: P1**　**状态: 有 heading 的文档已修复 (2026-09-21)；无 heading 文档待处理**
+
+## 2026-09-21: `_scope()` 改用完整 `section_path` —— parents 54 -> 103
+
+按本 issue「方案一」实施：`_scope()` 由「只取 `section_path[0]`」改为
+「用完整 `section_path`」，且**标题块把自己补到路径末尾**
+（标题的 `section_path` 是祖先链、不含自己，不补就会与自己的正文分家）。
+
+详细说明与实测见 `docs/parent_grouping_scope_fix.md`。要点：
+
+| 指标 | 改前 | 改后 |
+|---|---:|---:|
+| parents | 54 | **103** |
+| 单 parent 最大 chunk 数 | 11 | **4** |
+| parent token p90 | 1773 | **745** |
+| > 1500 token 的 parent | 7 (13%) | **2 (2%)** |
+| `openai_scaling_storage` parents | 1 | **9** |
+
+**★ 检索指标完全不受影响**：chunks 113 -> 113、总 token 34,662 -> 34,662、
+`full_text` / `sparse_text` 逐字相同、全文集合 SHA256 相同（`88a644004646ca12`）。
+原因：chunk 边界由「遇 heading 就收口」决定，而新分组恰好与 heading 边界重合。
+→ **本修复是纯 metadata 改进，无需重跑评估。**
+
+回归测试：`test_nested_sections_do_not_collapse_into_one_parent`
+（注入旧 `_scope()` 后失败：旧 1 个 parent / 新 3 个）。
+
+**仍未解决**：完全无 heading 的文档（`openai_agents_api` / `openai_model_misalignment`）
+仍只有 1 个 parent —— 这类文档没有结构信号，`_scope()` 无法改善。
+建议加「parent token 尺寸上限」兜底，见 `docs/parent_grouping_scope_fix.md` 第四节。
 
 ## 2026-09-20（第二次）: URL/HTML 路径的栈 bug 修好后, parents 16 -> 54
 

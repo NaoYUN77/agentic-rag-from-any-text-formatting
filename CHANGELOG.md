@@ -19,6 +19,19 @@
 
 ### Changed
 
+- **parent 分组改用完整 `section_path`**（`chunker._scope()`）：原实现只取
+  `section_path[0]`，实测在两类文档上退化 —— ① 顶层只有一个标题时（如
+  `openai_scaling_storage` 的 9 个章节全挂在同一个 lv1 下）第一层恒为同一个值；
+  ② 完全无 heading 的文档 `section_path` 全为空。两者都导致 parent 退化成"整篇一个组"。
+  改为用完整路径后 **parents 54 → 103**，单 parent 最大 chunk 数 **11 → 4**，
+  parent token p90 **1773 → 745**，>1500 token 的 parent **7 个(13%) → 2 个(2%)**。
+  标题块需把自己补到路径末尾（标题的 `section_path` 是祖先链、不含自己），
+  否则会与自己的正文分家。**检索指标完全不变**（chunks 113→113、总 token 34,662→34,662、
+  `full_text`/`sparse_text` 逐字相同、全文集合 SHA256 相同）—— 因为 chunk 边界由
+  "遇 heading 就收口"决定，而新分组恰好与 heading 边界重合，所以是**纯 metadata 改进**。
+  详见 `docs/parent_grouping_scope_fix.md`、`issues/10`。
+  新索引：`index_artifacts/phase0_scope`，collections `phase0_scope_dense` / `_sparse`；
+  `rag_server.py` 默认 collection 随之更新。
 - **`artifact_id` 改为确定性派生**（`stable_artifact_id`：`final_uri` → `uri` → 内容 `sha256`，取前 12 位十六进制）。原实现 4 个 parser 都用 `uuid.uuid4()`，导致每次重建 `chunk_id` 全变，无法做增量更新与逐 chunk 对比。保持 `doc_<12hex>` 形态不变。
 - **修复 `html.py` / `markdown.py` 的 `heading_stack` bug**：弹栈条件由 `while len(stack) >= level` 改为 `while stack and stack[-1][0] >= level`（栈改存 `(level, title)`）。原写法拿"栈深度"与"heading 层级"两种量纲相比，使**同级标题被 append 成前一个同级标题的子节点**。实测 `section_path` 在 80/117 chunks (68%) 上变化，parents 16 → 54。**注意：chunk 全文未变，检索指标逐位相同** —— 该修复的价值在 metadata / 引用 / Parent expansion，不在这套检索指标上。
 - `pdf_common.py` 修复 `_heading_size_levels` 的 `min(idx+1, 6)` 上限（会把第 7 档字号压平到同一级），并在 `build_artifact` 中改用 `_calibrate_font_levels` 的结果。
