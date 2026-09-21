@@ -23,14 +23,8 @@ def main() -> None:
     ap.add_argument("--pdf-pages", default=None)
     ap.add_argument("--pdf-language", default="ch")
     ap.add_argument("--no-chunk", action="store_true")
-    ap.add_argument("--chunker", choices=["block", "sentence"], default="block",
-                    help="切块策略: block=800token粗粒度; sentence=单句+metadata窗口")
-    ap.add_argument("--window-sentences", type=int, default=3,
-                    help="sentence 策略下, metadata 窗口的前后句数")
-    ap.add_argument("--chunk-tokens", type=int, default=800)
-    ap.add_argument("--overlap-tokens", type=int, default=400)
-    ap.add_argument("--window-tokens", type=int, default=400,
-                    help="预留参数, 当前不参与计算 (见 issues/09)")
+    ap.add_argument("--chunk-tokens", type=int, default=800,
+                    help="固定大小切块的 token 上限")
     args = ap.parse_args()
 
     value = args.url or args.file
@@ -44,10 +38,6 @@ def main() -> None:
         },
         build_chunks=not args.no_chunk,
         chunk_tokens=args.chunk_tokens,
-        overlap_tokens=args.overlap_tokens,
-        window_tokens=args.window_tokens,
-        chunker=args.chunker,
-        window_sentences=args.window_sentences,
     )
     artifact = result.artifact
 

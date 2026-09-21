@@ -87,14 +87,16 @@ def build_export(
     doc: str,
     out_root: Path,
     chunk_tokens: int = 800,
-    overlap_tokens: int = 400,
     strip_headings: bool = True,
 ) -> Tuple[str, Dict[str, Any]]:
     """重跑一篇, 写出 artifact/parents/chunks, 返回 (parser, 统计)。
 
-    chunk_tokens / overlap_tokens 显式传入 (此前硬编码 800/400) ——
-    这样扫描不同切块参数时不必改代码, 也避免"CLI 与库不一致"的口径问题。
+    chunk_tokens 显式传入 (此前硬编码 800) —— 这样扫描不同切块参数时
+    不必改代码, 也避免"CLI 与库不一致"的口径问题。
     strip_headings 同理: 标题只作 metadata 不进正文, 见 chunker._render_block。
+
+    注: overlap 已于 2026-09-21 取消（见 chunker 类 docstring），
+    因此这里不再有 overlap_tokens 参数。
     """
     root = EXPERIMENTS / doc
     old = json.loads((root / "artifact.json").read_text(encoding="utf-8"))
@@ -112,7 +114,7 @@ def build_export(
             text, _payload(text.encode("utf-8"), "text/markdown", uri))
 
     builder = BlockAwareHierarchicalChunkBuilder(
-        chunk_tokens=chunk_tokens, overlap_tokens=overlap_tokens,
+        chunk_tokens=chunk_tokens,
         strip_headings=strip_headings)
     parents, chunks = builder.build(artifact)
 
@@ -141,8 +143,6 @@ def main() -> int:
     ap.add_argument("--backend", default="local", choices=["local", "qwen"])
     ap.add_argument("--chunk-tokens", type=int, default=800,
                     help="切块上限 (默认 800)。此前硬编码, 现可扫参数。")
-    ap.add_argument("--overlap-tokens", type=int, default=400,
-                    help="切块重叠 (默认 400)。")
     ap.add_argument("--keep-headings", dest="strip_headings", action="store_false",
                     help="把标题渲染进 chunk 正文 (旧行为)。"
                          "默认剥离标题, 只作 metadata —— 见 chunker._render_block。")
@@ -168,7 +168,6 @@ def main() -> int:
         parser, stats = build_export(
             doc, out_root,
             chunk_tokens=args.chunk_tokens,
-            overlap_tokens=args.overlap_tokens,
         )
         parsers[doc] = parser
         for k, v in stats.items():
@@ -189,7 +188,7 @@ def main() -> int:
     print("=" * 80)
 
     from ingest.qdrant_indexer import write_index, build_index_plan, load_export_bundle
-    from semantic_chunker_demo import build_embeddings
+    from embeddings import build_embeddings
 
     bundles = [load_export_bundle(str(out_root / d)) for d in ALL_DOCS]
     plan = build_index_plan(bundles)
@@ -216,7 +215,10 @@ def main() -> int:
 
     manifest["embedding_backend"] = args.backend
     manifest["chunk_tokens"] = args.chunk_tokens
-    manifest["overlap_tokens"] = args.overlap_tokens
+    # 显式记 0: overlap 已于 2026-09-21 取消（见 chunker 类 docstring）。
+    # 保留该字段是为了让产物可追溯 —— 否则"这份索引到底有没有 overlap"
+    # 只能靠翻代码判断，而旧索引里这个值曾是 400。
+    manifest["overlap_tokens"] = 0
     manifest["parsers"] = parsers
     manifest["rebuild_seconds"] = round(elapsed, 1)
     (Path(args.artifact_dir) / "index_manifest.json").write_text(

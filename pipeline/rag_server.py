@@ -27,17 +27,20 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
-from semantic_chunker_demo import build_embeddings
+from embeddings import build_embeddings
 from hybrid_retriever import HybridRetriever
 from generation import QwenChatGenerator
 from reranker import DashScopeReranker
 
 QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
-COLLECTION = os.getenv("RAG_DENSE_COLLECTION", "redhat")
-SPARSE_COLLECTION = os.getenv("RAG_SPARSE_COLLECTION", "redhat_sparse")
+# 默认指向 Phase 0 的当前索引（固定大小切块、无 overlap）。
+# 此前默认是 "redhat" / "redhat_sparse" —— 那来自已废弃的 LlamaIndex
+# fixed-semantic 链路（rebuild_llamaindex_corpus.py，2026-09-21 删除）。
+COLLECTION = os.getenv("RAG_DENSE_COLLECTION", "phase0_noov_dense")
+SPARSE_COLLECTION = os.getenv("RAG_SPARSE_COLLECTION", "phase0_noov_sparse")
 SPARSE_ARTIFACT_DIR = Path(os.getenv(
     "RAG_SPARSE_ARTIFACT_DIR",
-    str(Path(__file__).parent / "index_artifacts"),
+    str(Path(__file__).parent / "index_artifacts" / "phase0_noov"),
 ))
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -52,15 +55,16 @@ async def lifespan(app: FastAPI):
 
     if not _state["client"].collection_exists(COLLECTION):
         raise RuntimeError(
-            "集合 %s 不存在。请先跑 rag_pipeline.py 建库" % COLLECTION
+            "集合 %s 不存在。请先跑 rebuild_phase0_index.py 建库，"
+            "或用 RAG_DENSE_COLLECTION 指定其他集合" % COLLECTION
         )
     info = _state["client"].get_collection(COLLECTION)
     print("[启动] 集合 %s, %d 个点" % (COLLECTION, info.points_count))
 
     if not _state["client"].collection_exists(SPARSE_COLLECTION):
         raise RuntimeError(
-            "集合 %s 不存在。请先跑 sparse_pipeline_demo.py 写入 sparse vector"
-            % SPARSE_COLLECTION
+            "集合 %s 不存在。请先跑 rebuild_phase0_index.py 建库（dense/sparse 一次写入），"
+            "或用 RAG_SPARSE_COLLECTION 指定其他集合" % SPARSE_COLLECTION
         )
     sparse_info = _state["client"].get_collection(SPARSE_COLLECTION)
     print("[启动] 集合 %s, %d 个点" % (SPARSE_COLLECTION, sparse_info.points_count))

@@ -258,7 +258,12 @@ class ResolveTests(unittest.TestCase):
             resolve_gold(GoldSpan(text="短"), idx, query_id="q1", gold_index=0)
 
     def test_gold_can_map_to_multiple_chunks(self) -> None:
-        """overlap 会让同一段文字进多个 chunk, gold 必须是集合。"""
+        """同一段文字可能落在多个 chunk 里, 所以 gold 必须是集合。
+
+        注: overlap 已于 2026-09-21 取消, 不再是这里的成因。但重复文本仍会出现
+        （如各页重复的样板文字、同一 block 被多处引用），因此 resolve_gold
+        返回集合这个行为依然必要。
+        """
         idx = FragmentIndex()
         for i in (1, 2):
             idx.add(FragmentRef(

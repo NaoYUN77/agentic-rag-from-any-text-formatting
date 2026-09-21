@@ -11,8 +11,10 @@ r"""chunk_tokens 灵敏度扫描 (600 / 800 / 1200)。
     chunks          切出多少个 chunk
     tokens total    语料总 token (反映 embedding 成本)
     avg / median    chunk 平均大小
-    top_ratio       顶到上限的比例 (说明上限是否真的在起作用)
-    overlap_ratio   带 overlap 的 chunk 比例 + overlap 占用的 token 比例
+    at_cap          顶到上限的比例 (说明上限是否真的在起作用)
+
+注: overlap 已于 2026-09-21 取消（见 chunker 类 docstring），
+因此本脚本不再统计 overlap 相关指标。
 
 判据
 ----
@@ -94,18 +96,13 @@ def load_artifact(doc: str):
         text, _payload(text.encode("utf-8"), "text/markdown", uri))
 
 
-def scan_one(artifact, chunk_tokens: int, overlap_tokens: int) -> Dict[str, Any]:
+def scan_one(artifact, chunk_tokens: int) -> Dict[str, Any]:
     """对一篇文章按给定 chunk_tokens 切块并统计。"""
-    builder = BlockAwareHierarchicalChunkBuilder(
-        chunk_tokens=chunk_tokens,
-        overlap_tokens=overlap_tokens,
-    )
+    builder = BlockAwareHierarchicalChunkBuilder(chunk_tokens=chunk_tokens)
     parents, chunks = builder.build(artifact)
 
     toks = [c.token_count for c in chunks]
     total = sum(toks)
-    ov = [c.overlap_from_previous or 0 for c in chunks]
-    ov_tokens = sum(ov)
     # 顶到上限: 留 2% 容差 (SentenceSplitter 不一定精确命中)
     cap = chunk_tokens * 0.98
 
@@ -118,10 +115,6 @@ def scan_one(artifact, chunk_tokens: int, overlap_tokens: int) -> Dict[str, Any]
         "tokens_max": max(toks) if toks else 0,
         "at_cap": sum(1 for t in toks if t >= cap),
         "at_cap_ratio": (sum(1 for t in toks if t >= cap) / len(toks)) if toks else 0.0,
-        "with_overlap": sum(1 for v in ov if v > 0),
-        "with_overlap_ratio": (sum(1 for v in ov if v > 0) / len(ov)) if ov else 0.0,
-        "overlap_tokens": ov_tokens,
-        "overlap_token_ratio": (ov_tokens / total) if total else 0.0,
     }
 
 
@@ -129,8 +122,6 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sizes", default="600,800,1200",
                     help="逗号分隔的 chunk_tokens 列表")
-    ap.add_argument("--overlap-ratio", type=float, default=0.5,
-                    help="overlap = chunk_tokens * ratio (默认 0.5, 与现状 800/400 一致)")
     ap.add_argument("--json-out", default="scan_chunk_tokens.json")
     args = ap.parse_args()
 
@@ -147,10 +138,9 @@ def main() -> int:
 
     report: Dict[str, Any] = {"sizes": {}, "per_doc": {}}
     for size in sizes:
-        overlap = int(size * args.overlap_ratio)
         agg: List[Dict[str, Any]] = []
         for doc, art in artifacts:
-            st = scan_one(art, size, overlap)
+            st = scan_one(art, size)
             report["per_doc"].setdefault(str(size), {})[doc] = st
             agg.append(st)
 
@@ -162,13 +152,10 @@ def main() -> int:
 
         chunks_total = int(_sum("chunks"))
         tokens_total = int(_sum("tokens_total"))
-        ov_tokens = int(_sum("overlap_tokens"))
         at_cap = int(_sum("at_cap"))
-        with_ov = int(_sum("with_overlap"))
 
         report["sizes"][str(size)] = {
             "chunk_tokens": size,
-            "overlap_tokens_setting": overlap,
             "chunks_total": chunks_total,
             "tokens_total": tokens_total,
             "tokens_avg": _avg("tokens_avg"),
@@ -176,30 +163,23 @@ def main() -> int:
             "tokens_max": max(a["tokens_max"] for a in agg),
             "at_cap": at_cap,
             "at_cap_ratio": (at_cap / chunks_total) if chunks_total else 0.0,
-            "with_overlap": with_ov,
-            "with_overlap_ratio": (with_ov / chunks_total) if chunks_total else 0.0,
-            "overlap_tokens": ov_tokens,
-            "overlap_token_ratio": (ov_tokens / tokens_total) if tokens_total else 0.0,
         }
 
     # ---------------- 输出 ----------------
-    print("=" * 92)
-    print("chunk_tokens 灵敏度扫描  (%d 篇, overlap = chunk_tokens * %.2f)"
-          % (len(artifacts), args.overlap_ratio))
-    print("=" * 92)
-    hdr = ("%8s %8s %9s %12s %9s %8s %9s %10s %12s" % (
-        "chunk", "overlap", "chunks", "tokens_total", "avg", "median",
-        "max", "at_cap", "ov_tokens"))
+    print("=" * 80)
+    print("chunk_tokens 灵敏度扫描  (%d 篇, 固定大小, 无 overlap)" % len(artifacts))
+    print("=" * 80)
+    hdr = ("%8s %9s %12s %9s %8s %9s %12s" % (
+        "chunk", "chunks", "tokens_total", "avg", "median", "max", "at_cap"))
     print(hdr)
-    print("-" * 92)
+    print("-" * 80)
     for size in sizes:
         r = report["sizes"][str(size)]
-        print("%8d %8d %9d %12d %9.1f %8.0f %9d %6d(%2.0f%%) %7d(%4.1f%%)" % (
-            r["chunk_tokens"], r["overlap_tokens_setting"], r["chunks_total"],
+        print("%8d %9d %12d %9.1f %8.0f %9d %6d(%2.0f%%)" % (
+            r["chunk_tokens"], r["chunks_total"],
             r["tokens_total"], r["tokens_avg"], r["tokens_median_avg"],
-            r["tokens_max"], r["at_cap"], r["at_cap_ratio"] * 100,
-            r["overlap_tokens"], r["overlap_token_ratio"] * 100))
-    print("-" * 92)
+            r["tokens_max"], r["at_cap"], r["at_cap_ratio"] * 100))
+    print("-" * 80)
 
     # 平台区判据: 用**相邻档**的斜率判断 (与最小档比没有意义)
     print("\n=== 灵敏度 (相邻档之间) ===")

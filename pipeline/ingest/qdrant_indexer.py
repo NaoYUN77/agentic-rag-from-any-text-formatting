@@ -531,7 +531,7 @@ def main() -> None:
     if args.dry_run:
         return
 
-    from semantic_chunker_demo import build_embeddings
+    from embeddings import build_embeddings
 
     embeddings = build_embeddings(args.embedding_backend)
     manifest = write_index(

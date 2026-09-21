@@ -79,7 +79,7 @@ def main() -> int:
     artifact = parse_html(payload)
 
     # --- 2. 切块 ---
-    builder = BlockAwareHierarchicalChunkBuilder(chunk_tokens=800, overlap_tokens=400)
+    builder = BlockAwareHierarchicalChunkBuilder(chunk_tokens=800)
     parents, chunks = builder.build(artifact)
 
     art_dict = artifact.to_dict()
@@ -242,7 +242,7 @@ def main() -> int:
              f'<dt>parents</dt><dd>{len(parents)}</dd>'
              f'<dt>chunks</dt><dd>{len(chunks)}</dd>'
              f'<dt>chunk tokens 合计</dt><dd>{sum(c.token_count for c in chunks):,}</dd>'
-             f'<dt>参数</dt><dd>chunk_tokens=800, overlap_tokens=400</dd>'
+             f'<dt>参数</dt><dd>chunk_tokens=800（固定大小, 无 overlap）</dd>'
              f"</dl></div>")
     P.append('<div class="flow">scope 分组 → '
              + " ｜ ".join(esc(p.scope_title[:38]) for p in parents) + "</div>")

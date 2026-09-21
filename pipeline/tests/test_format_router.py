@@ -8,7 +8,6 @@ from ingest.parsers.markdown import parse_markdown_text
 from ingest.chunker import BlockAwareHierarchicalChunkBuilder
 from ingest.quality import assess_raw_quality, decide_index
 from ingest.router import FormatRouter
-from ingest.sentence_chunker import SentenceWindowChunkBuilder, split_sentences
 from generation import build_context
 
 
@@ -122,7 +121,13 @@ class FormatRouterTests(unittest.TestCase):
             ]
             self.assertTrue(body, f"{parent.parent_id} 没有正文块")
 
-    def test_block_aware_chunker_respects_budget_and_overlap(self) -> None:
+    def test_block_aware_chunker_respects_budget_without_overlap(self) -> None:
+        """固定大小切块: 尊重 token 预算, 且块与块之间**不重复**源文本。
+
+        overlap 已于 2026-09-21 取消。旧实现会把上一块尾部带回新块,
+        因此下面对"片段区间互不重叠"的断言在旧实现下会失败 ——
+        它是这次改动的回归护栏。
+        """
         text = " ".join(
             f"Sentence {i} explains proxy routing and backend health checks."
             for i in range(1, 80)
@@ -158,10 +163,8 @@ class FormatRouterTests(unittest.TestCase):
         )
         _, chunks = BlockAwareHierarchicalChunkBuilder(
             chunk_tokens=80,
-            overlap_tokens=30,
         ).build(artifact)
         self.assertGreater(len(chunks), 1)
-        self.assertTrue(any(c.overlap_from_previous > 0 for c in chunks[1:]))
         self.assertTrue(all(c.token_count <= 80 for c in chunks))
         self.assertTrue(all(chunk.fragments for chunk in chunks))
         for chunk in chunks:
@@ -173,86 +176,24 @@ class FormatRouterTests(unittest.TestCase):
                 )
         self.assertTrue(all("Proxy" not in chunk.sparse_text for chunk in chunks))
 
-
-class SentenceSplitTests(unittest.TestCase):
-    def test_splits_english_and_chinese(self) -> None:
-        self.assertEqual(
-            split_sentences("First one. Second one."),
-            ["First one.", "Second one."],
+        # overlap 取消后的核心不变量: 正文块的字符区间互不重叠（无重复覆盖）。
+        spans = sorted(
+            (f.start_char, f.end_char)
+            for chunk in chunks
+            for f in chunk.fragments
+            if f.block_id == "b1"
         )
-        self.assertEqual(
-            split_sentences("负载平衡器是一组组件。它由两种技术组成。"),
-            ["负载平衡器是一组组件。", "它由两种技术组成。"],
-        )
-
-    def test_protects_abbreviations(self) -> None:
-        """'e.g.' / 'Fig.' 处不能切开。"""
-        out = split_sentences("See e.g. Fig. 3 for details. Then continue.")
-        self.assertEqual(len(out), 2)
-        self.assertTrue(out[0].startswith("See e.g."))
-
-    def test_list_marker_stays_with_its_content(self) -> None:
-        """回归: 有序列表的 '1.' 不能单独成为一个检索单元。
-
-        实测坑: "1. Break down the corpus" 曾被切成 "1." 与正文两段,
-        "1." 只有 2 个字符却成为独立 chunk。
-        """
-        out = split_sentences("1. Break down the corpus. 2. Encode each chunk.")
-        self.assertFalse(any(p.strip() in {"1.", "2."} for p in out))
-        self.assertTrue(any("Break down" in p for p in out))
-
-
-class SentenceWindowChunkBuilderTests(unittest.TestCase):
-    def _artifact(self, md: str):
-        return parse_markdown_text(md, source(md.encode(), "text/markdown"))
-
-    def test_window_does_not_cross_section(self) -> None:
-        md = (
-            "# 指南\n\n"
-            "## 1. 代理\n\n"
-            "代理转发请求。后端做健康检查。\n\n"
-            "## 2. 配置\n\n"
-            "配置写在文件里。需要重启。\n"
-        )
-        _, chunks = SentenceWindowChunkBuilder(window_sentences=3).build(
-            self._artifact(md)
-        )
-        self.assertTrue(chunks)
-        for c in chunks:
-            window = c.metadata["window_text"]
-            if "配置" in str(c.section_path):
-                # 配置节的窗口不能混入代理节的内容
-                self.assertNotIn("代理转发请求", window)
-            if "代理" in str(c.section_path):
-                self.assertNotIn("配置写在文件里", window)
-
-    def test_metadata_carries_citation_fields(self) -> None:
-        md = "# 标题\n\n正文的一句话。另一句话。\n"
-        _, chunks = SentenceWindowChunkBuilder(window_sentences=1).build(
-            self._artifact(md)
-        )
-        self.assertTrue(chunks)
-        for c in chunks:
-            for key in ("window_text", "window_sentences", "block_id", "scope"):
-                self.assertIn(key, c.metadata)
-            # 每个 chunk 恰好来自一个 block, 且 fragment 可溯源
-            self.assertEqual(len(c.fragments), 1)
-            block_id = c.fragments[0].block_id
-            self.assertEqual(c.metadata["block_id"], block_id)
-
-    def test_fragment_offsets_point_back_to_block(self) -> None:
-        """fragment 的字符坐标必须能在原 block 里定位到同一段文字。"""
-        md = "# 标题\n\n第一句话在这里。第二句话在那里。\n"
-        artifact = self._artifact(md)
-        _, chunks = SentenceWindowChunkBuilder(window_sentences=1).build(artifact)
-        by_id = {b.block_id: b for b in artifact.blocks}
-        for c in chunks:
-            f = c.fragments[0]
-            block = by_id[f.block_id]
-            self.assertEqual(
-                f.text, block.text[f.start_char:f.end_char],
-                f"fragment 坐标与 block 原文不一致: {f.block_id}",
+        self.assertGreater(len(spans), 1)
+        for (_, prev_end), (next_start, _) in zip(spans, spans[1:]):
+            self.assertLessEqual(
+                prev_end, next_start,
+                "片段区间重叠 -> 说明仍存在 overlap",
             )
+        # 且没有丢内容: 切块应覆盖正文块的绝大部分字符。
+        # 不要求 100% —— SentenceSplitter 会吃掉句间空白, 实测缺口约 0.3%。
+        covered = sum(e - s for s, e in spans)
+        self.assertGreaterEqual(covered, len(text) * 0.99)
+        self.assertLessEqual(covered, len(text))
 
 
 class CitationContextTests(unittest.TestCase):

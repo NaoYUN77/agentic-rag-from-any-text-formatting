@@ -144,7 +144,7 @@ def new_stats(doc: str) -> Dict[str, Any]:
         artifact = parse_markdown_text(
             text, _payload(text.encode("utf-8"), "text/markdown", uri))
 
-    builder = BlockAwareHierarchicalChunkBuilder(chunk_tokens=800, overlap_tokens=400)
+    builder = BlockAwareHierarchicalChunkBuilder(chunk_tokens=800)
     parents, chunks = builder.build(artifact)
 
     blocks = artifact.blocks

@@ -90,7 +90,7 @@ def _parse_metrics(report_md: str) -> Dict[str, Dict[str, float]]:
     return rows
 
 
-def run_variant(tag: str, chunk_tokens: int, overlap_tokens: int,
+def run_variant(tag: str, chunk_tokens: int,
                 env: Dict[str, str]) -> Dict:
     corpus = f"experiments_sweep/{tag}"
     art_dir = f"index_artifacts/phase0_sweep_{tag}"
@@ -98,13 +98,12 @@ def run_variant(tag: str, chunk_tokens: int, overlap_tokens: int,
     sparse = f"phase0_sweep_{tag}_sparse"
 
     print("=" * 78)
-    print("变体 %s : chunk_tokens=%d overlap=%d" % (tag, chunk_tokens, overlap_tokens))
+    print("变体 %s : chunk_tokens=%d" % (tag, chunk_tokens))
     print("=" * 78)
 
     print("  [1/3] 重建语料 ...")
     out = _run([PY, "rebuild_phase0_index.py", "--backend", "qwen",
                 "--chunk-tokens", str(chunk_tokens),
-                "--overlap-tokens", str(overlap_tokens),
                 "--out-dir", corpus,
                 "--artifact-dir", art_dir,
                 "--dense-collection", dense,
@@ -137,7 +136,6 @@ def run_variant(tag: str, chunk_tokens: int, overlap_tokens: int,
 
     print("  [3/3] 完成\n")
     return {"tag": tag, "chunk_tokens": chunk_tokens,
-            "overlap_tokens": overlap_tokens,
             "chunks": chunks, "parents": parents,
             "report": report_path, "metrics": metrics}
 
@@ -146,7 +144,6 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--variants", default="600,800,1200",
                     help="逗号分隔的 chunk_tokens 列表")
-    ap.add_argument("--overlap-ratio", type=float, default=0.5)
     ap.add_argument("--json-out", default="sweep_chunk_params.json")
     args = ap.parse_args()
 
@@ -162,8 +159,7 @@ def main() -> int:
     results = []
     for size in sizes:
         tag = "t%d" % size
-        results.append(run_variant(
-            tag, size, int(size * args.overlap_ratio), env))
+        results.append(run_variant(tag, size, env))
 
     # ---------------- 汇总 ----------------
     print("=" * 78)

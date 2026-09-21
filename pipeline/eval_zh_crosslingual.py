@@ -30,7 +30,7 @@ import requests
 
 from hybrid_retriever import HybridRetriever
 from qdrant_client import QdrantClient
-from semantic_chunker_demo import build_embeddings
+from embeddings import build_embeddings
 
 ARTIFACT_DIR = Path("index_artifacts/phase0_combined")
 QDRANT_PATH = "qdrant_data"

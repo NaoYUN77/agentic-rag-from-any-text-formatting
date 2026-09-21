@@ -71,7 +71,6 @@ class IndexReadyChunk:
     char_count: int
     page_start: Optional[int]
     page_end: Optional[int]
-    overlap_from_previous: int = 0
     quality: Optional[QualityReport] = None
     index_decision: Optional[IndexDecision] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -157,39 +156,50 @@ def _render_block(
 
 
 class BlockAwareHierarchicalChunkBuilder:
-    """Block 感知的分层切块器。
+    """Block 感知的**固定大小**切块器。
 
-    ⚠️ `window_tokens` 目前**不参与任何计算**。
-    ------------------------------------------
-    它被接收并保存为 `self.window_tokens`，但后续代码从未读取
-    （见 issues/09）。规划文档设想的"用滑动窗口做 embedding 语义距离、
-    在距离峰值处切分"从未实现 —— 实际切分走的是
-    `SentenceSplitter` 的句子边界 + 长度约束。
+    当前策略：固定大小 + 结构边界
+    ------------------------------
+    切分只由两件事决定：
 
-    保留该参数只为兼容既有调用方与 CLI。若要真正实现语义边界微调，
-    需先有评估集验证收益（在没有 qrels 的前提下做属于无法验证的优化）。
+    1. **结构边界** —— 遇到新 heading 且已有正文时收口。标题是作者自己做过的
+       语义切分，免费且高信噪比，所以拿它当边界。
+    2. **长度上限** —— 累积到 `chunk_tokens` 就收口；超大原子块
+       (`{code,formula,table,image}`) 不拆，独占一个 chunk。
+
+    ⚠️ **overlap 已取消**（2026-09-21）
+    --------------------------------
+    此前 `overlap_tokens=400` 会在收口时把上一块尾部带回新块。实测它的分布是
+    **双峰**的，且与 heading 精确互补：
+
+        有 heading 的文档  -> 章节本身即边界, overlap 几乎不触发 (0~1 个)
+        无 heading 的文档  -> 唯一信号就是长度+overlap, 重叠占该文 token 43%~47%
+
+    即近一半 token 预算花在重复内容上，且重叠文本会同时进两个 chunk 的向量
+    → 同一内容可被双命中，挤占 `candidate_k`。而它真正起作用的只是
+    "接住跨块指代"，实测携带的 2~6 句中只有第 1 句在起作用。
+    结论：overlap 收益远小于代价，**移除**。
+
+    ⚠️ **滑动窗口 (`window_tokens`) 已取消**（2026-09-21）
+    --------------------------------------------------
+    该参数从未参与任何计算（只被接收并保存，后续代码从未读取）。它属于
+    "语义切片"的规划范围（用滑动窗口算 embedding 语义距离、在距离峰值处切分），
+    该方向暂缓，因此把参数一并删除，避免留下"看起来能用、实际是死参数"的坑。
+
+    → 若将来要做语义边界微调，应先在**无结构文档**上做（有 heading 的地方
+      再用语义切分会与作者边界打架），且必须先有评估集验证收益。
     """
 
     def __init__(
         self,
         chunk_tokens: int = 800,
-        overlap_tokens: int = 400,
-        window_tokens: int = 400,
         strip_headings: bool = True,
     ) -> None:
         if chunk_tokens <= 0:
             raise ValueError("chunk_tokens must be greater than 0")
-        if overlap_tokens < 0:
-            raise ValueError("overlap_tokens must be greater than or equal to 0")
-        if overlap_tokens >= chunk_tokens:
-            raise ValueError("overlap_tokens must be smaller than chunk_tokens")
         self.chunk_tokens = chunk_tokens
-        self.overlap_tokens = overlap_tokens
-        # 预留字段：当前未使用，见类 docstring 与 issues/09
-        self.window_tokens = window_tokens
         # 标题是否只作 metadata 而不进 chunk 正文（见 _render_block）
         self.strip_headings = strip_headings
-        self._text_piece_tokens = max(1, chunk_tokens - overlap_tokens)
         self._splitter = SentenceSplitter(
             chunk_size=chunk_tokens,
             chunk_overlap=0,
@@ -204,8 +214,12 @@ class BlockAwareHierarchicalChunkBuilder:
         if total <= self.chunk_tokens:
             return [_Piece(block, 0, len(text), text, total)]
 
+        # 超限的文本块按句子边界切成 <= chunk_tokens 的 piece。
+        # 此前这里用 chunk_tokens - overlap_tokens 预留 overlap 空间,
+        # overlap 取消后直接用 chunk_tokens —— 让句子尽量吃满预算,
+        # 避免产出偏小的 chunk。
         splitter = SentenceSplitter(
-            chunk_size=self._text_piece_tokens,
+            chunk_size=self.chunk_tokens,
             chunk_overlap=0,
         )
         parts = splitter.split_text(text)
@@ -286,7 +300,6 @@ class BlockAwareHierarchicalChunkBuilder:
         parent_id: str,
         pieces: Sequence[_Piece],
         chunk_index: int,
-        overlap_from_previous: int,
     ) -> Optional[IndexReadyChunk]:
         """返回 None 表示该 chunk 正文为空（纯 heading），应被丢弃。"""
         fragments = [ChunkFragment(
@@ -380,7 +393,6 @@ class BlockAwareHierarchicalChunkBuilder:
             char_count=char_count,
             page_start=min(pages) if pages else None,
             page_end=max(pages) if pages else None,
-            overlap_from_previous=overlap_from_previous,
             quality=quality,
             index_decision=index_decision,
             metadata={
@@ -412,71 +424,6 @@ class BlockAwareHierarchicalChunkBuilder:
             return IndexDecision("low", True, False, 0.0, 0.2, True, "low quality")
         return IndexDecision("reject", False, False, 0.0, 1.0, True, "reject quality")
 
-    def _slice_tail(self, piece: _Piece, target_tokens: int) -> Optional[_Piece]:
-        if target_tokens <= 0:
-            return None
-        if piece.is_atomic or piece.is_heading:
-            return None
-        if piece.token_count <= target_tokens:
-            return piece
-
-        text = piece.text
-        low = 0
-        high = len(text)
-        while low < high:
-            mid = (low + high) // 2
-            if self._token_size(text[mid:]) <= target_tokens:
-                high = mid
-            else:
-                low = mid + 1
-        start = low
-        while start < len(text) and text[start].isspace():
-            start += 1
-        if start >= len(text):
-            return None
-        sliced = text[start:]
-        token_count = self._token_size(sliced)
-        if token_count <= 0:
-            return None
-        return _Piece(
-            block=piece.block,
-            start_char=piece.start_char + start,
-            end_char=piece.end_char,
-            text=sliced,
-            token_count=token_count,
-            is_heading=piece.is_heading,
-            is_atomic=piece.is_atomic,
-            oversized=piece.oversized,
-        )
-
-    def _tail_overlap(
-        self,
-        pieces: Sequence[_Piece],
-        target_tokens: Optional[int] = None,
-    ) -> Tuple[List[_Piece], int]:
-        target = self.overlap_tokens if target_tokens is None else target_tokens
-        if target <= 0:
-            return [], 0
-        tail: List[_Piece] = []
-        total = 0
-        for piece in reversed(pieces):
-            if piece.is_heading:
-                break
-            remaining = target - total
-            if remaining <= 0:
-                break
-            if piece.token_count <= remaining:
-                tail.append(piece)
-                total += piece.token_count
-                continue
-            sliced = self._slice_tail(piece, remaining)
-            if sliced is not None:
-                tail.append(sliced)
-                total += sliced.token_count
-            break
-        tail.reverse()
-        return tail, total
-
     def build(self, artifact: DocumentArtifact) -> Tuple[List[ParentNode], List[IndexReadyChunk]]:
         parents: List[ParentNode] = []
         chunks: List[IndexReadyChunk] = []
@@ -489,54 +436,45 @@ class BlockAwareHierarchicalChunkBuilder:
             parent_id = f"{artifact.artifact_id}_p{len(parents) + 1:04d}"
             parent_chunks: List[IndexReadyChunk] = []
             current: List[_Piece] = []
-            overlap_from_previous = 0
 
-            def emit(carry_overlap: bool = True) -> None:
-                nonlocal current, overlap_from_previous, chunk_counter
+            def emit() -> None:
+                """收口当前累积的 piece 成一个 chunk, 然后清空累积。
+
+                overlap 取消后收口就是纯粹的"造块 + 清空", 不再有
+                "回填上一块尾部"的分支。
+                """
+                nonlocal current, chunk_counter
                 if not current:
                     return
                 # 先试造再递增计数: _make_chunk 在"正文为空"(纯 heading)时
                 # 返回 None, 该 chunk 被丢弃。若先递增, chunk_id 会出现空洞。
                 candidate = self._make_chunk(
                     artifact, parent_id, current, chunk_counter + 1,
-                    overlap_from_previous,
                 )
                 if candidate is not None:
                     chunk_counter += 1
                     chunks.append(candidate)
                     parent_chunks.append(candidate)
-                if carry_overlap:
-                    overlap, overlap_tokens = self._tail_overlap(current)
-                    current = list(overlap)
-                    overlap_from_previous = overlap_tokens
-                else:
-                    current = []
-                    overlap_from_previous = 0
+                current = []
 
             for block in blocks:
                 for piece in self._block_pieces(block):
                     current_tokens = sum(p.token_count for p in current)
                     has_body = any(not p.is_heading for p in current)
 
+                    # 结构边界: 遇到新标题且已有正文 -> 收口。
+                    # 标题是作者自己做过的语义切分, 拿它当边界免费且高信噪比。
                     if piece.is_heading and has_body:
-                        emit(carry_overlap=False)
+                        emit()
+                    # 长度上限: 装不下就先收口, 再让这个 piece 起新块。
                     elif current and current_tokens + piece.token_count > self.chunk_tokens:
-                        emit(carry_overlap=has_body)
-                        if current and sum(p.token_count for p in current) + piece.token_count > self.chunk_tokens:
-                            budget = max(0, self.chunk_tokens - piece.token_count)
-                            current, overlap_from_previous = self._tail_overlap(
-                                current,
-                                target_tokens=budget,
-                            )
-                        if piece.is_atomic and piece.oversized:
-                            current = []
+                        emit()
 
                     current.append(piece)
 
                     # 超大原子块不拆, 单独形成一个 chunk。
                     if piece.is_atomic and piece.oversized:
                         emit()
-                        current = []
 
             if current:
                 emit()

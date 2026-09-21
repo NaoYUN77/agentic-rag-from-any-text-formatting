@@ -12,7 +12,6 @@ from .models import DocumentArtifact, RouteDecision, SourcePayload
 from .parser_registry import get_parser
 from .quality import assess_raw_quality, decide_index
 from .router import FormatRouter
-from .sentence_chunker import SentenceWindowChunkBuilder
 from .source import load_source
 
 
@@ -38,10 +37,6 @@ class IngestPipeline:
         parser_kwargs: Dict[str, Any] | None = None,
         build_chunks: bool = True,
         chunk_tokens: int = 800,
-        overlap_tokens: int = 400,
-        window_tokens: int = 400,
-        chunker: str = "block",
-        window_sentences: int = 3,
         strip_headings: bool = True,
     ) -> IngestResult:
         source: SourcePayload = load_source(
@@ -76,21 +71,13 @@ class IngestPipeline:
                     parents = []
                     chunks = []
                     if build_chunks:
-                        # 两种切块策略并存, 便于 A/B 对比:
-                        #   block    -> 800-token chunk(粗粒度)
-                        #   sentence -> 单句检索单元 + metadata 窗口(细粒度)
-                        if chunker == "sentence":
-                            builder = SentenceWindowChunkBuilder(
-                                window_sentences=window_sentences,
-                                max_window_tokens=chunk_tokens,
-                            )
-                        else:
-                            builder = BlockAwareHierarchicalChunkBuilder(
-                                chunk_tokens=chunk_tokens,
-                                overlap_tokens=overlap_tokens,
-                                window_tokens=window_tokens,
-                                strip_headings=strip_headings,
-                            )
+                        # 固定大小 + 结构边界切块（见 chunker 类 docstring）。
+                        # 原先并存的 "sentence"（单句检索单元 + metadata 窗口）
+                        # 策略已于 2026-09-21 随"滑动窗口机制取消"一并删除。
+                        builder = BlockAwareHierarchicalChunkBuilder(
+                            chunk_tokens=chunk_tokens,
+                            strip_headings=strip_headings,
+                        )
                         parents, chunks = builder.build(artifact)
                     return IngestResult(
                         artifact=artifact,

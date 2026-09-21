@@ -23,7 +23,7 @@ from typing import List, Tuple
 import numpy as np
 
 from pdf_loader import load_markdown
-from semantic_chunker_demo import CN_SENTENCE_SPLIT_REGEX, build_embeddings
+from embeddings import CN_SENTENCE_SPLIT_REGEX, build_embeddings
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")

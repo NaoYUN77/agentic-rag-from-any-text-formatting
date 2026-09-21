@@ -369,7 +369,7 @@ def _build_retriever(
         return _StubRetriever(items, gold_map), None, None
 
     from qdrant_client import QdrantClient
-    from semantic_chunker_demo import build_embeddings
+    from embeddings import build_embeddings
     from hybrid_retriever import HybridRetriever
 
     client = QdrantClient(path=args.qdrant_path)
@@ -448,7 +448,7 @@ def main() -> None:
     print()
 
     from qdrant_client import QdrantClient
-    from semantic_chunker_demo import build_embeddings
+    from embeddings import build_embeddings
     from hybrid_retriever import HybridRetriever
 
     retriever, reranker, client = _build_retriever(args, items, gold_map, stages)
