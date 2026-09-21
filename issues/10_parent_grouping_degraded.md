@@ -1,6 +1,7 @@
 # 问题 10: parent 分组退化, 章节级上下文实际不可用
 
-**优先级: P1**　**状态: 有 heading 的文档已修复 (2026-09-21)；无 heading 文档待处理**
+**优先级: P1**　**状态: 已修复 (2026-09-21)** —— 有 heading 的靠完整 `section_path`，
+无 heading 的靠 `parent_tokens` 上限兜底
 
 ## 2026-09-21: `_scope()` 改用完整 `section_path` —— parents 54 -> 103
 
@@ -26,9 +27,26 @@
 回归测试：`test_nested_sections_do_not_collapse_into_one_parent`
 （注入旧 `_scope()` 后失败：旧 1 个 parent / 新 3 个）。
 
-**仍未解决**：完全无 heading 的文档（`openai_agents_api` / `openai_model_misalignment`）
-仍只有 1 个 parent —— 这类文档没有结构信号，`_scope()` 无法改善。
-建议加「parent token 尺寸上限」兜底，见 `docs/parent_grouping_scope_fix.md` 第四节。
+**无 heading 文档另用尺寸上限兜底**（同日实施，方案 A）：
+新增 `parent_tokens` 参数（默认 1600 = 2× `chunk_tokens`，0 表示不限制），
+超限的分组在跑完后按 chunk 顺序拆成多个 parent。
+
+```text
+parents                     103 -> 105
+parent token max           2378 -> 1543
+> 1600 token 的 parent        2 -> 0
+openai_agents_api          1773 -> 1314 + 459
+openai_model_misalignment  2378 -> 1543 + 835
+chunks / 总 token      113/34,662 -> 113/34,662（不变）
+```
+
+有结构的分组完全不受影响（p90 只有 745 token，碰不到 1600）—— 这是**纯安全阀**。
+CLI：`rebuild_phase0_index.py --parent-tokens`。
+
+**至此本 issue 的两类退化都已处理。** 见 `docs/parent_grouping_scope_fix.md`。
+
+> ⚠️ 遗留判据：`parent expansion` 上线前必须先有这个上限 —— 否则
+> `final_top_k=5` 个命中全展开最坏约 11,890 token context；有上限则 ≤ 8,000。
 
 ## 2026-09-20（第二次）: URL/HTML 路径的栈 bug 修好后, parents 16 -> 54
 
