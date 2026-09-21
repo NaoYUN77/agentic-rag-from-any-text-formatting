@@ -33,14 +33,14 @@ from generation import QwenChatGenerator
 from reranker import DashScopeReranker
 
 QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
-# 默认指向 Phase 0 的当前索引（固定大小切块、无 overlap）。
+# 默认指向 Phase 0 的当前索引（固定大小切块、无 overlap、parent 按完整 section_path 分组）。
 # 此前默认是 "redhat" / "redhat_sparse" —— 那来自已废弃的 LlamaIndex
 # fixed-semantic 链路（rebuild_llamaindex_corpus.py，2026-09-21 删除）。
-COLLECTION = os.getenv("RAG_DENSE_COLLECTION", "phase0_noov_dense")
-SPARSE_COLLECTION = os.getenv("RAG_SPARSE_COLLECTION", "phase0_noov_sparse")
+COLLECTION = os.getenv("RAG_DENSE_COLLECTION", "phase0_scope_dense")
+SPARSE_COLLECTION = os.getenv("RAG_SPARSE_COLLECTION", "phase0_scope_sparse")
 SPARSE_ARTIFACT_DIR = Path(os.getenv(
     "RAG_SPARSE_ARTIFACT_DIR",
-    str(Path(__file__).parent / "index_artifacts" / "phase0_noov"),
+    str(Path(__file__).parent / "index_artifacts" / "phase0_scope"),
 ))
 STATIC_DIR = Path(__file__).parent / "static"
 

@@ -267,23 +267,37 @@ class BlockAwareHierarchicalChunkBuilder:
     def _scope(block: DocumentBlock, fallback: str) -> str:
         """决定一个 block 归属哪个 parent 分组。
 
+        ⚠️ 用**完整 section_path** 分组，而不是只取 `section_path[0]`。
+        ----------------------------------------------------------------
+        旧实现只取第一层，实测导致 parent 严重退化（见 issues/10）：
+
+            openai_scaling_storage  9 个章节全都挂在同一个 lv1 标题下
+                                    -> section_path[0] 恒为文档标题 -> 1 个 parent
+            openai_agents_api       完全无 heading
+                                    -> section_path 为空 -> 全部落同一 fallback
+
+        前者是"顶层只有一个值"，后者是"根本没有结构"。取完整路径能修掉前者。
+
         注意 heading 的特殊性: 标题块的 `section_path` 是【祖先链, 不含自己】
         (见 markdown.py 里 `heading_stack[:-1]` 的语义), 所以:
 
             第 1 章 (lv1)          -> section_path = []          <- 祖先为空
             第 1 章下的正文块       -> section_path = ['第 1 章']  <- 含自身章节
 
-        若对 lv1 标题直接返回 fallback(文档标题), 它会与自己的正文块分到
-        不同分组 —— 实测导致 11 个 lv1 标题塌缩成一个"章节目录"chunk
-        (只有标题、无正文、sparse_text 为空)。详见 issues/10。
+        因此标题块要**把自己的文本补进路径末尾**，才能与自己章节下的正文块
+        落到同一组（正文块的 section_path 正是 `祖先链 + [该标题]`）。
+        若不做这一步，标题会与自己的正文分家 —— 实测会让 lv1 标题塌缩成一个
+        "章节目录"chunk（只有标题、无正文、sparse_text 为空）。
 
-        因此: 标题块若没有祖先, 就用【自身文本】作为 scope, 这样它与
-        自己章节下的正文块落到同一组 (正文块的 section_path[0] 正是该标题)。
+        无 section_path 且非 heading 的块（即整篇无 heading 的文档）仍落到
+        fallback —— 这类文档没有可用的结构信号，本函数无法改善，
+        需要靠 parent 尺寸上限兜底（见 issues/10 的待办）。
         """
-        if block.section_path:
-            return block.section_path[0]
         if block.type == "heading":
-            return block.text
+            path = list(block.section_path) + [block.text]
+            return " > ".join(str(x) for x in path)
+        if block.section_path:
+            return " > ".join(str(x) for x in block.section_path)
         return fallback or "文档开头"
 
     def _group_blocks(self, artifact: DocumentArtifact) -> "OrderedDict[str, List[DocumentBlock]]":

@@ -121,6 +121,43 @@ class FormatRouterTests(unittest.TestCase):
             ]
             self.assertTrue(body, f"{parent.parent_id} 没有正文块")
 
+    def test_nested_sections_do_not_collapse_into_one_parent(self) -> None:
+        """回归: 顶层只有一个标题时, 子章节不能被合并成"整篇一个 parent"。
+
+        旧 `_scope()` 只取 `section_path[0]`。实测 `openai_scaling_storage`
+        有 9 个章节, 但它们全都挂在同一个 lv1 标题下 -> `section_path[0]`
+        恒为文档标题 -> 整篇只剩 1 个 parent, parent expansion 失去意义。
+
+        改用完整 `section_path` 后, 每个子章节应各自成组。见 issues/10。
+        """
+        md = (
+            "# 文档标题\n\n"
+            "## 第一节\n\n"
+            "第一节的正文内容。\n\n"
+            "## 第二节\n\n"
+            "第二节的正文内容。\n\n"
+            "## 第三节\n\n"
+            "第三节的正文内容。\n"
+        )
+        artifact = parse_markdown_text(md, source(md.encode(), "text/markdown"))
+        parents, chunks = BlockAwareHierarchicalChunkBuilder().build(artifact)
+
+        # 3 个子章节 -> 至少 3 个分组（旧实现这里只有 1 个）
+        self.assertGreaterEqual(len(parents), 3)
+
+        # 且不能有哪个 parent 吞掉整篇正文
+        body = [
+            c for c in chunks
+            if any(f.block_type != "heading" for f in c.fragments)
+        ]
+        self.assertGreater(len(body), 1)
+        for parent in parents:
+            mine = [c for c in body if c.parent_id == parent.parent_id]
+            self.assertLess(
+                len(mine), len(body),
+                f"{parent.parent_id} 吞掉了整篇正文, 分组退化",
+            )
+
     def test_block_aware_chunker_respects_budget_without_overlap(self) -> None:
         """固定大小切块: 尊重 token 预算, 且块与块之间**不重复**源文本。
 
