@@ -158,6 +158,43 @@ class FormatRouterTests(unittest.TestCase):
                 f"{parent.parent_id} 吞掉了整篇正文, 分组退化",
             )
 
+    def test_oversized_group_is_split_by_parent_tokens(self) -> None:
+        """回归: 无 heading 文档整篇落进一个分组时, 由 `parent_tokens` 兜底。
+
+        完全无 heading 的文档没有结构信号, `section_path` 全空 ->
+        整篇落进同一个分组 -> parent ≈ 整篇文档, expansion 失去聚焦作用。
+        实测 `openai_model_misalignment` 曾出现 2378 token 的单个 parent。
+
+        `parent_tokens=0` 表示不限制, 应保持整篇一个 parent;
+        设一个较小的上限后应拆成多个, 且每个都不超上限。
+        """
+        md = " ".join(
+            f"Sentence {i} explains proxy routing and backend health checks."
+            for i in range(1, 80)
+        )
+        artifact = parse_markdown_text(md, source(md.encode(), "text/markdown"))
+
+        # 该文档确实没有 heading -> 只有一个分组
+        self.assertFalse(
+            [b for b in artifact.blocks if b.type == "heading"],
+            "本测试要的是无 heading 文档",
+        )
+
+        parents_free, _ = BlockAwareHierarchicalChunkBuilder(
+            chunk_tokens=80, parent_tokens=0,
+        ).build(artifact)
+        self.assertEqual(len(parents_free), 1)
+
+        parents_capped, _ = BlockAwareHierarchicalChunkBuilder(
+            chunk_tokens=80, parent_tokens=100,
+        ).build(artifact)
+        self.assertGreater(len(parents_capped), 1)
+        for parent in parents_capped:
+            self.assertLessEqual(
+                parent.token_count, 100,
+                f"{parent.parent_id} 超出 parent_tokens 上限",
+            )
+
     def test_block_aware_chunker_respects_budget_without_overlap(self) -> None:
         """固定大小切块: 尊重 token 预算, 且块与块之间**不重复**源文本。
 
