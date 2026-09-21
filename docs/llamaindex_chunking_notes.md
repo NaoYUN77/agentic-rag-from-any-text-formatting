@@ -1,5 +1,12 @@
 # LlamaIndex 分块机制学习与工程总结
 
+> ⚠️ **2026-09-21 状态说明**：本文记录的 LlamaIndex 分块机制（Node Parser 原理、
+> SentenceWindowNodeParser、metadata 替换等）作为**框架知识仍然有效**。
+> 但文中提到的**本项目实现文件已全部删除** —— `llamaindex_fixed_semantic_splitter.py`、
+> `llamaindex_fixed_semantic_demo.py`、`rebuild_llamaindex_corpus.py` 属于已废弃的
+> "固定切片 + 语义切片"链路（见 `CHANGELOG.md` 的 Removed 段）。
+> 当前生产切块器是 `pipeline/ingest/chunker.py`（固定大小 + 结构边界，无 overlap）。
+
 > 本文档记录 LlamaIndex 特有的分块(Node Parser)机制的学习与工程实践。
 > 版本: llama-index-core (本地已安装), 文档来源: developers.llamaindex.ai
 >

@@ -6,6 +6,7 @@
 
 | 文档 | 定位 |
 |---|---|
+| `pipeline_flow.md` | **全链路流程图**：摄取→索引→检索→生成→服务五阶段的 Mermaid 图、各阶段数据契约、离线/在线边界。同目录 `pipeline_flow.html` 可直接用浏览器打开看渲染效果 |
 | `project_overview_for_agents.md` | **新 Agent 接手总览**：项目目标、架构、已实现、未实现、待新增、约束和代码地图 |
 | `plan_vs_implementation.md` | **规划与实现对照表**：逐条核对 `format_routing_and_cleaning_plan.md` 的设计点与代码实际状态，标注过时位置 |
 | `format_routing_and_cleaning_plan.md` | 多格式摄取、格式路由、质量门控、Block 与 Chunk 的架构方案（⚠️ 设计史料，第 1/2/3 章思想有效，实现细节见上表） |
@@ -13,6 +14,7 @@
 | `block_aware_chunking_implementation.md` | 当前 Block -> Piece -> Chunk、overlap、fragments 和 Qdrant 入库实现说明 |
 | `phase0_loop_verification.md` | 语料扩充与 Phase 0 端到端功能闭环验证结论、踩坑记录 |
 | `zh_query_crosslingual_eval.md` | 中文 Query 跨语言检索方案对照实验（A/B/C 三方案） |
+| `eval_harness_design.md` | **评估闭环设计**：qrels 新 schema、gold 文本锚定、block_id 碰撞陷阱、分阶段指标、四步执行计划、10 条已知陷阱、harness 自检 |
 
 ## 2. Block 与 Chunking
 

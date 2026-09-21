@@ -27,17 +27,20 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
-from semantic_chunker_demo import build_embeddings
+from embeddings import build_embeddings
 from hybrid_retriever import HybridRetriever
 from generation import QwenChatGenerator
 from reranker import DashScopeReranker
 
 QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
-COLLECTION = os.getenv("RAG_DENSE_COLLECTION", "redhat")
-SPARSE_COLLECTION = os.getenv("RAG_SPARSE_COLLECTION", "redhat_sparse")
+# 默认指向 Phase 0 的当前索引（固定大小切块、无 overlap、parent 按完整 section_path 分组）。
+# 此前默认是 "redhat" / "redhat_sparse" —— 那来自已废弃的 LlamaIndex
+# fixed-semantic 链路（rebuild_llamaindex_corpus.py，2026-09-21 删除）。
+COLLECTION = os.getenv("RAG_DENSE_COLLECTION", "phase0_scope_dense")
+SPARSE_COLLECTION = os.getenv("RAG_SPARSE_COLLECTION", "phase0_scope_sparse")
 SPARSE_ARTIFACT_DIR = Path(os.getenv(
     "RAG_SPARSE_ARTIFACT_DIR",
-    str(Path(__file__).parent / "index_artifacts"),
+    str(Path(__file__).parent / "index_artifacts" / "phase0_scope"),
 ))
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -52,15 +55,16 @@ async def lifespan(app: FastAPI):
 
     if not _state["client"].collection_exists(COLLECTION):
         raise RuntimeError(
-            "集合 %s 不存在。请先跑 rag_pipeline.py 建库" % COLLECTION
+            "集合 %s 不存在。请先跑 rebuild_phase0_index.py 建库，"
+            "或用 RAG_DENSE_COLLECTION 指定其他集合" % COLLECTION
         )
     info = _state["client"].get_collection(COLLECTION)
     print("[启动] 集合 %s, %d 个点" % (COLLECTION, info.points_count))
 
     if not _state["client"].collection_exists(SPARSE_COLLECTION):
         raise RuntimeError(
-            "集合 %s 不存在。请先跑 sparse_pipeline_demo.py 写入 sparse vector"
-            % SPARSE_COLLECTION
+            "集合 %s 不存在。请先跑 rebuild_phase0_index.py 建库（dense/sparse 一次写入），"
+            "或用 RAG_SPARSE_COLLECTION 指定其他集合" % SPARSE_COLLECTION
         )
     sparse_info = _state["client"].get_collection(SPARSE_COLLECTION)
     print("[启动] 集合 %s, %d 个点" % (SPARSE_COLLECTION, sparse_info.points_count))
@@ -126,10 +130,20 @@ class Hit(BaseModel):
     text: str
     file_name: Optional[str] = None
     page: Optional[int] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
     section: Optional[str] = None
+    section_path: List[str] = Field(default_factory=list)
     chunk_index: Optional[int] = None
     char_count: Optional[int] = None
     n_sentences: Optional[int] = None
+    # 单句检索单元: unit_kind="sentence" 时, window_text 是 metadata 里的
+    # 前后文窗口(不进 embedding), bbox 用于原文高亮
+    unit_kind: Optional[str] = None
+    window_text: Optional[str] = None
+    bbox: Optional[List[float]] = None
+    # 块级来源 URL（HTML 路径填入），用于"这段来自哪个页面"的引用
+    url: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
@@ -218,8 +232,16 @@ def _to_hit(p, rank: int, mode: str) -> Hit:
         text=pl.get("text", ""),
         file_name=pl.get("file_name"),
         page=pl.get("page"),
+        page_start=pl.get("page_start"),
+        page_end=pl.get("page_end"),
         section=pl.get("section"),
+        section_path=pl.get("section_path") or [],
         chunk_index=pl.get("chunk_index"),
+        # 单句策略: 检索命中单句后取这些字段拼上下文与做引用定位
+        unit_kind=pl.get("unit_kind"),
+        window_text=pl.get("window_text"),
+        bbox=pl.get("bbox"),
+        url=pl.get("url"),
         char_count=pl.get("char_count"),
         n_sentences=pl.get("n_sentences"),
     )
@@ -358,7 +380,7 @@ def info() -> Dict[str, Any]:
         "vector_size": c.config.params.vectors.size,
         "distance": str(c.config.params.vectors.distance),
         "qdrant_path": QDRANT_PATH,
-        "model": "qwen3-vl-embedding",
+        "model": getattr(_state.get("embeddings"), "model", None) or "unknown",
         "chat_model": _state.get("generator").model if _state.get("generator") else None,
         "rerank_model": _state.get("reranker").model if _state.get("reranker") else None,
         "mode": "hybrid + RRF",

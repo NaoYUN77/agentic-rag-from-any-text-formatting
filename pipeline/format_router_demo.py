@@ -23,9 +23,8 @@ def main() -> None:
     ap.add_argument("--pdf-pages", default=None)
     ap.add_argument("--pdf-language", default="ch")
     ap.add_argument("--no-chunk", action="store_true")
-    ap.add_argument("--chunk-tokens", type=int, default=800)
-    ap.add_argument("--overlap-tokens", type=int, default=400)
-    ap.add_argument("--window-tokens", type=int, default=400)
+    ap.add_argument("--chunk-tokens", type=int, default=800,
+                    help="固定大小切块的 token 上限")
     args = ap.parse_args()
 
     value = args.url or args.file
@@ -39,8 +38,6 @@ def main() -> None:
         },
         build_chunks=not args.no_chunk,
         chunk_tokens=args.chunk_tokens,
-        overlap_tokens=args.overlap_tokens,
-        window_tokens=args.window_tokens,
     )
     artifact = result.artifact
 

@@ -9,10 +9,25 @@
 
 ## 链路概览
 
+**旧链路（LlamaIndex，01~07 的语境）**：
+
 ```text
 语料清洗(MinerU) -> 分块(固定长度+语义微调) -> 向量化(单句嵌入选切点) -> 入库(Qdrant) -> 检索
      ↑                      ↑                        ↑                    ↑            ↑
    问题 01                问题 02                  问题 03              问题 04      问题 05
+```
+
+**Phase 0 新链路（Block-aware，08~11 的语境）**：
+
+```text
+格式路由 -> Parser -> DocumentBlock[] -> Cleaner -> Quality Gate
+                                                       ↓
+                                                  Chunk Builder
+                                                       ↓
+                                            Parent / IndexReadyChunk
+     ↑            ↑             ↑              ↑
+   问题 08      问题 09       问题 10        问题 11
+  (代码块位置)  (参数空转)   (parent 退化)  (heading 层级) ← 根因
 ```
 
 ## 问题总览
@@ -27,6 +42,21 @@
 | 06 | 分块层 | 块跨章节, 导致主题混淆(查 Keepalived 召回 HAProxy) | **P0** | **已修复** |
 | 07 | 解析层 | PDF 代码块被误判为标题, section 噪声严重 | P1 | 待解决 |
 | 08 | 解析层 | HTML 补充代码块位置错乱, section 归属丢失 | P2 | 潜伏(未触发) |
+| 09 | 分块层 | `window_tokens` 参数空转, 语义边界微调未实现 | P2 | **已解决**(删参数) |
+| 10 | 分块层 | parent 分组退化, 章节级上下文不可用 | **P1** | 有 heading 的**已修复** |
+| 11 | 解析层 | heading 层级抽取不准, `section_path` 前缀被污染 | **P1** | **已修复**(PDF+URL) |
+| 12 | 解析层 | PDF 链路内容有损(丢代码/页码/目录), 质量门未察觉 | **P1** | 待解决 |
+
+> **09/10/11/12 是 Phase 0 新链路(Block-aware)的发现**, 01~07 主要针对旧 LlamaIndex 链路。
+> 三者存在依赖: **11 是根因 → 导致 10 → 09 是独立的参数死重**。
+> 修 10 之前必须先修 11, 否则只是"在错误前缀下切得更细"。
+>
+> **11 与 12 在 2026-09-18 有重要更新**:
+> - 11 追加跨格式实测, **推翻了"用文本编号做层级"和"归一化 level"两个方案**
+>   （URL 语料 0/95 个 heading 带编号; 归一化是保序的, 不改变结果）
+> - 结论: 结构层级在两类输入上都不完全可信 → **section_path 应降级为"尽力而为的提示"**
+>   → 依赖它的 Parent expansion / Contextual Retrieval 需重新评估基础
+> - 12 是首次 PDF 实测, 发现配置示例全丢、页码无法保留、目录降级成假正文
 
 ### 修复记录
 
@@ -92,5 +122,9 @@ P2  难度高或收益不确定
 | `06_chunk_cross_section.md` | 块跨章节、顶层章节硬边界分块 |
 | `07_pdf_section_noise.md` | PDF 代码块误判为标题 |
 | `08_html_code_supplement_placement.md` | HTML 补充代码块位置错乱、section 归属丢失 |
+| `09_window_tokens_unused.md` | `window_tokens` 参数空转、语义边界未实现（已删参数解决） |
+| `10_parent_grouping_degraded.md` | parent 分组退化成整篇文档、章节上下文失效 |
+| `11_heading_level_extraction.md` | heading 层级不准、`section_path` 前缀污染 |
+| `12_pdf_content_loss.md` | PDF 丢代码块/页码/目录、层级压平、质量门未察觉 |
 
 

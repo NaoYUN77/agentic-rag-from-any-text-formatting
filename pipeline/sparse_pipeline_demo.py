@@ -177,7 +177,7 @@ def split_oversized(text: str, max_chars: int) -> List[str]:
 def build_chunks(markdown: str, source: str, max_chars: int = 800) -> List[Chunk]:
     """标题感知的段落打包。
 
-    这是独立实验分块, 不复用 semantic_chunker_demo / hybrid_chunk_demo。
+    这是独立实验分块, 不复用 ingest/chunker.py 的生产切块器。
     目标只是让每个 BM25 文档有稳定的文本边界和 section metadata。
     """
     paragraphs = split_paragraphs(markdown)

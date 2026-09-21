@@ -63,13 +63,11 @@ def _chunk(
             }
         ],
         "full_text": text,
-        "dense_text": text,
         "sparse_text": sparse_text,
         "token_count": len(text.split()),
         "char_count": len(text),
         "page_start": 1,
         "page_end": 1,
-        "overlap_from_previous": 0,
         "quality": {"score": 0.95, "status": "high", "flags": [], "metrics": {}},
         "index_decision": {
             "tier": "high" if sparse else "low",

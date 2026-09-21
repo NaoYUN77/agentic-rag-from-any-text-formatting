@@ -37,8 +37,7 @@ class IngestPipeline:
         parser_kwargs: Dict[str, Any] | None = None,
         build_chunks: bool = True,
         chunk_tokens: int = 800,
-        overlap_tokens: int = 400,
-        window_tokens: int = 400,
+        strip_headings: bool = True,
     ) -> IngestResult:
         source: SourcePayload = load_source(
             value,
@@ -72,10 +71,12 @@ class IngestPipeline:
                     parents = []
                     chunks = []
                     if build_chunks:
+                        # 固定大小 + 结构边界切块（见 chunker 类 docstring）。
+                        # 原先并存的 "sentence"（单句检索单元 + metadata 窗口）
+                        # 策略已于 2026-09-21 随"滑动窗口机制取消"一并删除。
                         builder = BlockAwareHierarchicalChunkBuilder(
                             chunk_tokens=chunk_tokens,
-                            overlap_tokens=overlap_tokens,
-                            window_tokens=window_tokens,
+                            strip_headings=strip_headings,
                         )
                         parents, chunks = builder.build(artifact)
                     return IngestResult(

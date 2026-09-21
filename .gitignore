@@ -53,3 +53,31 @@ pipeline/server.err
 
 # 与本项目无关的嵌套仓库
 hello_agent_demo/
+
+# 评估运行产物(每次跑都会新增, 不入库)
+pipeline/eval/runs/
+
+# 重建期产物(与 experiments/ 同性质: 含第三方文档长文本)
+pipeline/experiments_rebuilt/
+pipeline/index_artifacts/phase0_rebuilt/
+
+# playwright-cli 运行状态
+.playwright-cli/
+
+# 重建/扫描期产物(与 experiments/ 同性质: 含第三方文档长文本)
+pipeline/experiments_final/
+pipeline/experiments_rebuilt*/
+pipeline/experiments_sweep/
+pipeline/rebuilt_strip*/
+pipeline/rebuilt_*/
+pipeline/scan_chunk_tokens.json
+pipeline/sweep_chunk_params.json
+pipeline/sweep_ranking.json
+pipeline/sweep_ranking_*.json
+
+# 抓取的第三方文档(版权内容, 不入公开仓库)
+docs/url_doc_*.html
+docs/url_doc_*.json
+# pipeline/docs/ 里只排除抓取的第三方文档, 自己的分析文档要入库
+pipeline/docs/url_doc_*
+docs/pipeline_flow.html

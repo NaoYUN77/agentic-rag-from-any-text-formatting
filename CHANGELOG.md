@@ -5,17 +5,106 @@
 ### Added
 
 - 新增 `pipeline/ingest/qdrant_indexer.py`，支持把 Phase 0 的 `artifact.json + chunks.jsonl` 写入 Qdrant。
-- dense 使用 `dense_text` 生成 embedding，sparse 使用 `sparse_text` 生成 jieba + BM25 sparse vector。
+- dense 使用 `full_text` 生成 embedding，sparse 使用 `sparse_text` 生成 jieba + BM25 sparse vector。
 - dense 和 sparse 使用同一个稳定 point id，并把原始 `chunk_id`、`fragments`、质量和索引决策写入 payload。
 - 新增 `pipeline/tests/test_qdrant_indexer.py`。
 - 新增 Anthropic Contextual Retrieval Phase 0 全链路 finding。
+- 新增 `pipeline/scan_chunk_tokens.py`：`chunk_tokens` 灵敏度扫描（纯本地，不写索引）。
+- 新增 `pipeline/sweep_chunk_params.py`：端到端扫描（重建语料 → 建索引 → 跑评估），每个变体独立路径、不删既有目录。
+- 新增 `pipeline/sweep_ranking.py`：排序参数扫描（复用已有索引，不重建），支持 `--stages`。
+- 新增 `pipeline/tests/test_pdf_section_path.py`、`test_pdf_outline_calibration.py`、`test_heading_stack.py`、`test_artifact_id.py`。
+- `rebuild_phase0_index.py` 新增 `--chunk-tokens`（此前硬编码 800），并把参数写进 manifest。
+- `pdf_common.py` 新增 `_OutlineMatcher`（精确优先 + 字符二元组 Jaccard 模糊兜底，阈值 0.85）与 `_calibrate_font_levels`（用 outline 实测层级校正字号排名阶梯）。
+- `ingest/models.py` 新增 `stable_artifact_id()`。
 
 ### Changed
 
+- **parent 分组改用完整 `section_path`**（`chunker._scope()`）：原实现只取
+  `section_path[0]`，实测在两类文档上退化 —— ① 顶层只有一个标题时（如
+  `openai_scaling_storage` 的 9 个章节全挂在同一个 lv1 下）第一层恒为同一个值；
+  ② 完全无 heading 的文档 `section_path` 全为空。两者都导致 parent 退化成"整篇一个组"。
+  改为用完整路径后 **parents 54 → 103**，单 parent 最大 chunk 数 **11 → 4**，
+  parent token p90 **1773 → 745**，>1500 token 的 parent **7 个(13%) → 2 个(2%)**。
+  标题块需把自己补到路径末尾（标题的 `section_path` 是祖先链、不含自己），
+  否则会与自己的正文分家。**检索指标完全不变**（chunks 113→113、总 token 34,662→34,662、
+  `full_text`/`sparse_text` 逐字相同、全文集合 SHA256 相同）—— 因为 chunk 边界由
+  "遇 heading 就收口"决定，而新分组恰好与 heading 边界重合，所以是**纯 metadata 改进**。
+  详见 `docs/parent_grouping_scope_fix.md`、`issues/10`。
+  新索引：`index_artifacts/phase0_scope`，collections `phase0_scope_dense` / `_sparse`；
+  `rag_server.py` 默认 collection 随之更新。
+- **`artifact_id` 改为确定性派生**（`stable_artifact_id`：`final_uri` → `uri` → 内容 `sha256`，取前 12 位十六进制）。原实现 4 个 parser 都用 `uuid.uuid4()`，导致每次重建 `chunk_id` 全变，无法做增量更新与逐 chunk 对比。保持 `doc_<12hex>` 形态不变。
+- **修复 `html.py` / `markdown.py` 的 `heading_stack` bug**：弹栈条件由 `while len(stack) >= level` 改为 `while stack and stack[-1][0] >= level`（栈改存 `(level, title)`）。原写法拿"栈深度"与"heading 层级"两种量纲相比，使**同级标题被 append 成前一个同级标题的子节点**。实测 `section_path` 在 80/117 chunks (68%) 上变化，parents 16 → 54。**注意：chunk 全文未变，检索指标逐位相同** —— 该修复的价值在 metadata / 引用 / Parent expansion，不在这套检索指标上。
+- `pdf_common.py` 修复 `_heading_size_levels` 的 `min(idx+1, 6)` 上限（会把第 7 档字号压平到同一级），并在 `build_artifact` 中改用 `_calibrate_font_levels` 的结果。
+- `eval/run_eval.py` 新增「阶段失败告警」：rerank 单条失败原被 try/except 吞掉、按 0 分计入，会把"配额耗尽/鉴权失败"显示成"模型效果差"。现在报告与控制台都会打印失败率与首个错误。
+- `eval/run_eval.py` docstring 用法修正：`--chunks` 必须传每篇文档各自的 `chunks.jsonl`，不能传 `index_artifacts/<x>/chunks.jsonl`（该文件不含 `fragments`）。
 - HTML Parser 会比较 Trafilatura 与 Readability Markdown 的 heading 完整性，优先保留结构更完整的正文。
 - `rag_server.py` 支持通过 `RAG_QDRANT_PATH`、`RAG_DENSE_COLLECTION`、`RAG_SPARSE_COLLECTION`、`RAG_SPARSE_ARTIFACT_DIR` 切换索引。
 - FastAPI 检索和引用响应增加 `chunk_id`、`artifact_id`。
 - Qdrant local rebuild 会在关闭客户端后清理目标 collection 目录，避免旧 artifact 的 point 残留。
+- **heading 从 chunk 正文剥离，只留 metadata**（`BlockAwareHierarchicalChunkBuilder.strip_headings`，默认 `True`）：`_render_block` 对 heading 渲染成 `""`，标题清单存入 `chunk.metadata.headings`，祖先链已在 `section_path`。纯 heading 的 chunk（如 PDF 封面标题）被 `_make_chunk` 显式丢弃（`full_text` 为空）。dense embedding 现在用 heading-free 的 `full_text`。`sparse_text` 本就不含 heading，所以稀疏检索与 gold 反查**零影响**。
+- **删除冗余的 `dense_text` 字段**：实测与 `full_text` 100% 相同。索引器 `qdrant_indexer._chunk_payload` 改为直接用 `full_text` 生成 dense embedding；payload 新增 `headings` 字段（供生成阶段补背景，旧 chunks.jsonl 无此字段时优雅降级）。
+- **生成阶段用 metadata 补背景**（`generation.build_context` 新增 `include_background`，默认 `True`）：每段正文前加一行 `背景: 文档《x》；章节路径: …；本段涵盖小节: …；出处: url`，用 `section_path` / `headings` / `url` 把被剥离的标题结构还原给 LLM。可关闭做 A/B。
+- `rebuild_phase0_index.py` 新增 `--keep-headings`（反义 `--strip-headings` 默认值）与 `--dry-run`（只写 chunks.jsonl、不写 Qdrant）。
+- **向量 / 重排序模型升级**：embedding 由 `qwen3-vl-embedding`（多模态接口）换成 `qwen3.7-text-embedding`（通用文本向量接口，默认 1024 维，201 语种，128K token）；rerank 由 `gte-rerank-v2` 换成 `qwen3.7-text-rerank`。
+  - 新增 `semantic_chunker_demo.QwenTextEmbeddings`：走 `/services/embeddings/text-embedding/text-embedding`，请求体 `input.texts`、响应 `text_index`，并支持 `text_type=query/document` 非对称检索（入库 document、检索 query）。**注意这是与多模态接口不同的 endpoint，不能只改模型名。**
+  - `rag_server.py` 的 `/api/info` 改为动态上报实际 embedding 模型名（不再硬编码）。
+
+### Removed
+
+- **废弃整条「语义切片 / 滑动窗口」链路**（2026-09-21）。此前 overlap 与滑动窗口都属于
+  "固定切片 + 语义切片"这条探索路线，现决定整体放弃，content 先做纯固定大小切块，
+  语义方向留待后续重新讨论。删除的文件：
+
+  | 类 | 文件 | 说明 |
+  |---|---|---|
+  | LlamaIndex 固定+语义切片 | `llamaindex_fixed_semantic_splitter.py`、`llamaindex_fixed_semantic_demo.py`、`rebuild_llamaindex_corpus.py`、`ingest_markdown_corpus.py` | 产出 `redhat` collection 的那条链路 |
+  | 滑动窗口 demo | `llamaindex_window_demo.py`、`sentence_window_demo.py`、`window_sweep_demo.py`、`hybrid_chunk_demo.py` | 边界窗口 / 句窗语义微调实验 |
+  | 旧端到端管线 | `rag_pipeline.py`、`preprocess.py` | MinerU 清洗 + 语义微调，已被 Phase 0 取代 |
+  | 单句窗口切块器 | `ingest/sentence_chunker.py`（+ `--chunker sentence` 选项、`window_sentences` 参数） | 生产里最后一个"滑动窗口"机制 |
+
+  - `rag_server.py` 默认 collection 由 `redhat` / `redhat_sparse` 改为
+    `phase0_noov_dense` / `phase0_noov_sparse`，`RAG_SPARSE_ARTIFACT_DIR` 默认指向
+    `index_artifacts/phase0_noov`；启动错误提示改为指向 `rebuild_phase0_index.py`。
+  - README 的快速开始、文件树、用法示例不再引用已删脚本。
+  - `ingest/pipeline.py` 的 `ingest()` 移除 `chunker` / `window_sentences` 参数。
+  - `tests/test_format_router.py` 删除 `SentenceSplitTests` 与
+    `SentenceWindowChunkBuilderTests`（共 9 例）。
+- **把嵌入模型封装从 demo 文件抽成正式模块** `pipeline/embeddings.py`
+  （`build_embeddings` / `QwenTextEmbeddings` / `QwenVLEmbeddings` / `HashingEmbeddings` /
+  `CN_SENTENCE_SPLIT_REGEX`）。此前这些**生产基础设施**住在 `semantic_chunker_demo.py`
+  这个演示脚本里，`rag_server.py` / `rebuild_phase0_index.py` / `eval/run_eval.py` /
+  `ingest/qdrant_indexer.py` 反过来依赖一个 "demo" 文件，命名与实际角色不符。
+  抽取后 `semantic_chunker_demo.py` 本身被删除，8 个文件的 import 改为 `from embeddings import ...`。
+- **取消 chunk 的 `overlap`**（`BlockAwareHierarchicalChunkBuilder`）：移除 `overlap_tokens`
+  参数、`IndexReadyChunk.overlap_from_previous` 字段、以及 `_tail_overlap()` / `_slice_tail()`
+  两个方法。收口逻辑简化为纯粹的"造块 + 清空累积"。
+  - **原因（实测）**：overlap 分布是**双峰**的，且与 heading 精确互补 —— 有 heading 的文档
+    几乎不触发（章节本身即语义边界），无 heading 的文档则占到该文 token 的 **43%~47%**。
+    全局 14/117 chunks（12%）带 overlap，占 5,407/40,069 token（**13.5%**）。
+    重叠文本会同时进两个 chunk 的向量 → 同一内容可被双命中，挤占 `candidate_k`。
+  - **收益侧**：overlap 真正起作用的只是"接住跨块指代"，实测它携带的 2~6 句里只有第 1 句在起作用。
+  - **影响**：chunks 117 → **113**，总 token 40,069 → **34,662（−13.5%）**。
+    减少量 5,407 与独立测得的 overlap token 数**逐位相同**；各文档的片段覆盖字符数不变
+    （无内容丢失）。检索指标 **hit@5 全阶段持平**（dense 0.941 / sparse 0.765 / rrf 0.971），
+    rrf 的 recall@20 与 MRR@20 也完全一致 → **overlap 对检索质量没有可测收益，纯属成本**。
+  - `rebuild_phase0_index.py` 的 `--overlap-tokens` 已移除；manifest 仍写 `"overlap_tokens": 0`
+    以保持产物可追溯。
+- **删除滑动窗口参数 `window_tokens`**：它从未参与任何计算（只被接收并保存）。属于"语义切片"
+  的规划范围（用滑动窗口算 embedding 语义距离、在距离峰值处切分），该方向暂缓，故连同参数一并
+  删除，避免留下"看起来能用、实际是死参数"的坑。同步移除 `format_router_demo.py` 的
+  `--overlap-tokens` / `--window-tokens`，`scan_chunk_tokens.py` / `sweep_chunk_params.py`
+  的 overlap 统计与 `--overlap-ratio`。
+- **移除 `pdf_mineru` 解析器**（`pipeline/ingest/parsers/pdf_mineru.py`），PDF 路由的
+  fallback 由 `[pdf_mineru, pdf_pymupdf]` 改为 `[pdf_pymupdf]`。它是唯一经
+  `PDF → Markdown → Block` 中转的解析器：
+  - Markdown 表达不了页码/坐标/字号，实测其产物 `font_size` 全为 `null`；
+  - heading 层级被压平（只剩 lv1/lv2，见 `issues/11`）；
+  - 依赖外部 CLI `mineru-open-api`，且 `flash-extract` 有 20 页上限。
+
+  代价：**PDF 侧不再有任何 OCR 链路**，扫描件/纯图片 PDF 无法解析
+  （`pdf_pdfplumber` 与 `pdf_pymupdf` 都只处理文本层）。
+  至此架构中不再存在经 Markdown 中转的解析器，`parse_markdown_text` 只服务
+  真正的 `.md` 输入。新增不变量测试 `test_no_markdown_transit_parser_registered`。
 
 ### Verified
 

@@ -27,7 +27,7 @@ import jieba
 import numpy as np
 from qdrant_client import QdrantClient
 
-from semantic_chunker_demo import build_embeddings
+from embeddings import build_embeddings
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")

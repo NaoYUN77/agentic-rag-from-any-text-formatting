@@ -1,5 +1,12 @@
 # 语义分块策略对比(工程经验)
 
+> ⚠️ **2026-09-21 状态说明**：本文对比的"语义分块 / 边界窗口 / 句窗"等策略，
+> **本项目已决定不再采用**（content 先做纯固定大小切块，见 `CHANGELOG.md` 的 Removed 段）。
+> 文中引用的实现脚本（`llamaindex_fixed_semantic_*`、`window_sweep_demo`、
+> `hybrid_chunk_demo`、`sentence_window_demo` 等）**均已删除**。
+> 本文作为**选型对比的历史记录**保留 —— 它解释了"为什么不选语义切分"，
+> 以及各策略的成本/效果差异。若将来重启语义方向，这里是起点。
+
 > 本文档是**选型导向**的: 把几种分块策略和嵌入机制放在一起横向对比, 给出成本、效果和适用场景。
 >
 > 与其它文档的关系:
@@ -333,16 +340,118 @@ file: xxx.pdf | page: N | section: xxx      69.5 字     2.14x
 真实指标     recall@k / MRR                    需要标注评估集
 ```
 
-**目前缺的是评估集。** 没有它, "策略 3 比策略 2 好"这类结论只是间接推断 —— 因为切点落在语义跳变处, 不等于检索就能召回。
+### 2026-09-20 更新: 评估集已经有了, 而且跑了 —— 结论比预期更微妙
 
-**要补的东西:**
+原先这里写"目前缺的是评估集"。现在有了:
+`eval/qrels/phase0_url_draft.jsonl`（39 条 query，gold 锚在**原文文本**上而非 id）
++ `eval/run_eval.py`（5 阶段：dense / sparse / union / rrf / rerank）
++ 真实语义 embedding（`QwenVLEmbeddings`，1024 维，非零维 100%）。
+
+#### 实测一: `chunk_tokens` 600/800/1200 对检索**无可测差异**
+
+10 篇博客语料，各档独立重建 + 建索引 + 评估：
+
+| metric（rerank 阶段） | 600 (137ch) | 800 (117ch) | 1200 (107ch) |
+|---|---:|---:|---:|
+| hit@5 | 0.941 | 0.941 | 0.971 |
+| recall@20 | 0.912 | 0.941 | 0.971 |
+| MRR@20 | 0.820 | 0.794 | 0.807 |
+| nDCG@5 | 0.838 | 0.830 | 0.845 |
+
+**差异全部 ≤ 0.03，而 n=34 → 0.03 恰好是 1 条 query。** 即噪声。
+
+**但"参数没影响语料"是错的** —— 逐篇统计，7/10 篇的 chunk 数确实变了
+（合计 137 → 117 → 107，约 15% 的 chunk 改变）。
+
+> 所以准确的说法是: **这份 34 条 query 的评估集对 chunk 边界不敏感**，
+> 而不是"chunk 大小不重要"。不能外推。
+
+#### 实测二: 小 chunk **不是容量上限造成的**
+
+Red Hat 手册（463 blocks）在 600/800/1200 三档下，`<100 token` 的 chunk
+**都是 9 个** —— 提高上限并不减少小 chunk。
+
+看这 9 个的构成，根因有两类：
 
 ```text
-[ ] LLM 标注: 对每个相邻位置判"这里换话题了吗", 得到比标题干净的标签
-[ ] 建评估集: 一批查询 + 标注相关块
-[ ] 用 recall@k 横向比较各策略(包括策略 5 的检索层效果)
-[ ] 换 2~3 份不同类型的语料重复验证
+① 短 section（6/9）—— 内容驱动，调 cap 治不了
+   2.4. 路由方法              section 全部正文只有  88 字符
+   3.5. 配置 FTP              84 字符
+   第 4 章 ...                79 字符
+   4.3. 启动服务              144 字符
+   5.6. 启动 HAPROXY          120 字符
+
+② heading 无正文（2/9）—— 是缺陷
+   "Red Hat Enterprise Linux 7"  tok=6   frags=['heading']
+   "负载平衡器管理"              tok=8   frags=['heading']
+   （封面标题，本身就没有正文块）
+
+③ 其它（1/9）
+   "索引"  tok=21，但该 section 全部正文有 1502 字符 —— 内容去了别处
 ```
+
+> **结论: 想治小 chunk，调 `chunk_tokens` 是错的工具。**
+> 短 section 要靠"合并进邻居"（代价：跨 section 混合），
+> heading-only chunk 应该直接不产出。
+
+#### 实测三: 两个处理方案的代价都量过了
+
+10 篇博客语料，117 chunks（14.5% <100 token，section 纯度 100%）：
+
+| 方案 | chunks | <100token | 跨 >1 section |
+|---|---:|---:|---:|
+| 现状 | 117 | 14.5% | **0%** |
+| A 合并进同 parent 邻居 | 100 | 0% | **15%** ← 代价 |
+| B 直接丢弃 | 100 | 0% | 0% |
+
+**方案 B 不可行** —— 那 17 个小 chunk 里多数是**真实内容章节**，不只是致谢：
+
+```text
+## Excessive token consumption from tools makes agents less efficient  (44tok)
+## Building blocks, workflows, and agents                              (53tok)
+## Benefits of code execution with MCP                                (53tok)
+### Concurrency is not CPU parallelism                                 (47tok)
+### LIFO sends new work back to the slow process                       (60tok)
+## Going from zero to one: a roadmap to great evals for agents         (61tok)
+（只有 4 个是 Acknowledgements / Acknowledgments）
+```
+
+**方案 A 的代价是 15% 的 chunk 跨 section** —— 而 section 混合会稀释语义、
+让 `section_path` 歧义、并让 Parent expansion 失效。
+
+**两个方案都有真实代价，而检索指标对 chunk 变化不敏感 → 收益未证，暂不做。**
+
+#### 实测四: 长文档**仍然测不了**
+
+Red Hat 手册确实能压到参数（400→1600 让 chunk 数从 154 变到 76），
+但**它没有可用的 qrels**：
+
+- `eval/legacy/mixed_qrels.jsonl` 的 gold 是**裸 point_id**，README 已标注失效
+- 实测验证失效：`rh_04` 问的是 `virtual_ipaddress 在哪里配置`，
+  但 gold 指向的 chunk 讲的是**调度算法** —— 语义完全不对
+- 该语料（`index_artifacts/chunks.jsonl`，354 chunks）是
+  `source: llamaindex_fixed_semantic` 建的，与 qrels 标注时的切块不是同一份
+
+→ **要在长文档上验证分片，必须先为它标注文本锚定的 qrels。**
+   这是一件标注工作，不能靠"用当前检索结果反推 gold"（那是循环论证）。
+
+### 更新后的待办
+
+```text
+[x] 建评估集: 39 条 query, gold 锚在原文文本 (eval/qrels/phase0_url_draft.jsonl)
+[x] 用 recall@k / MRR 横向比较 chunk_tokens 600/800/1200 —— 无差异
+[x] 量出小 chunk 的两个处理方案的代价 —— 都有代价, 收益未证
+[ ] 为长文档(Red Hat PDF)标注文本锚定的 qrels —— 否则分片结论只在这 10 篇博客上成立
+[ ] 换 2~3 份不同类型的语料重复验证
+[ ] LLM 标注: 对每个相邻位置判"这里换话题了吗", 得到比标题干净的标签
+[ ] rerank 侧验证(配额恢复后): candidate_k 提高是否让 rerank 受益
+```
+
+**关于 `candidate_k` 的一个提醒（2026-09-20）**：
+实测把它从 20 提到 100，`union` 阶段 hit@5 从 0.824 升到 0.882（+0.058）。
+**但 `union` 是 eval 专属的诊断阶段，生产路径走的是 `rrf_fuse` → rerank，
+而 `rrf` 对 candidate_k 完全不敏感（恒 0.912）。**
+→ 不要据此改 `candidate_k` 默认值。详见 `top_k_and_candidate_depth.md`。
 
 ---
 

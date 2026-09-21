@@ -13,3 +13,11 @@ beautifulsoup4>=4.12
 markdownify>=1.0
 lxml>=5.4
 readability-lxml>=0.9
+
+# PDF 解析 (MIT 许可, 无 copyleft 义务)
+# 提供页码 / bbox / 字号 / 原生大纲, 见 ingest/parsers/pdf_pdfplumber.py
+pdfplumber>=0.11
+
+# 可选: PyMuPDF 速度更快(C 库), 但许可是 AGPL-3.0
+# 仅在项目本身以 AGPL 开源, 或已购买 Artifex 商业许可时启用
+# pymupdf>=1.24
