@@ -42,7 +42,7 @@
 | 06 | 分块层 | 块跨章节, 导致主题混淆(查 Keepalived 召回 HAProxy) | **P0** | **已修复** |
 | 07 | 解析层 | PDF 代码块被误判为标题, section 噪声严重 | P1 | 待解决 |
 | 08 | 解析层 | HTML 补充代码块位置错乱, section 归属丢失 | P2 | 潜伏(未触发) |
-| 09 | 分块层 | `window_tokens` 参数空转, 语义边界微调未实现 | P2 | 待解决 |
+| 09 | 分块层 | `window_tokens` 参数空转, 语义边界微调未实现 | P2 | **已解决**(删参数) |
 | 10 | 分块层 | parent 分组退化, 章节级上下文不可用 | **P1** | 待解决 |
 | 11 | 解析层 | heading 层级抽取不准, `section_path` 前缀被污染 | **P1** | 待解决 |
 | 12 | 解析层 | PDF 链路内容有损(丢代码/页码/目录), 质量门未察觉 | **P1** | 待解决 |
@@ -122,7 +122,7 @@ P2  难度高或收益不确定
 | `06_chunk_cross_section.md` | 块跨章节、顶层章节硬边界分块 |
 | `07_pdf_section_noise.md` | PDF 代码块误判为标题 |
 | `08_html_code_supplement_placement.md` | HTML 补充代码块位置错乱、section 归属丢失 |
-| `09_window_tokens_unused.md` | `window_tokens` 参数空转、语义边界未实现 |
+| `09_window_tokens_unused.md` | `window_tokens` 参数空转、语义边界未实现（已删参数解决） |
 | `10_parent_grouping_degraded.md` | parent 分组退化成整篇文档、章节上下文失效 |
 | `11_heading_level_extraction.md` | heading 层级不准、`section_path` 前缀污染 |
 | `12_pdf_content_loss.md` | PDF 丢代码块/页码/目录、层级压平、质量门未察觉 |

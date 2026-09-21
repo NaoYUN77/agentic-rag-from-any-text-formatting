@@ -24,11 +24,13 @@ DocumentBlock      17 字段
 IndexReadyChunk    17 字段
 ChunkFragment       7 字段（page / bbox 是 2026-09-18 新增）
 
-BlockAwareHierarchicalChunkBuilder  → 800-token chunk（当前默认）
-SentenceWindowChunkBuilder          → 单句 + metadata 窗口（备选）
+BlockAwareHierarchicalChunkBuilder  → 固定大小 chunk（当前唯一策略）
 ```
 
-**哪一套是"the"检索单元尚未决定** —— 这正是评估集要回答的问题。
+> **2026-09-21 更新**：`SentenceWindowChunkBuilder`（单句 + metadata 窗口）已随
+> "滑动窗口机制取消"一并**删除**（`ingest/sentence_chunker.py`）。
+> 该取舍现已决定：**不再保留单句检索单元这套备选**，`--chunker sentence` 选项也一并移除。
+> 语义切分方向整体暂缓，详见 `issues/09` 与 `CHANGELOG.md`。
 
 ### ③ 引用信息 → Metadata ✅ 已实现
 
@@ -134,10 +136,10 @@ window_token_count    0
 
 | 项 | 状态 | 处置建议 |
 |---|---|---|
-| `sentence_chunker.py`（230 行） | 用户已决定不用单句（成本 ×9.4） | **保留作备选**，但需在文档标注"未采用" |
+| ~~`sentence_chunker.py`（230 行）~~ | ~~用户已决定不用单句（成本 ×9.4）~~ | **已删除（2026-09-21）** —— 连同 `--chunker sentence` 选项一起移除 |
 | `pdf_pymupdf.py`（143 行） | AGPL 许可，pdfplumber 已够用 | 保留为可选适配器，`requirements.txt` 已注释 |
 
-保留这两个是合理的（都是"可切换的备选"），但**必须让人一眼看出它们不是主路径**。
+保留 `pdf_pymupdf` 是合理的（可切换的备选），但**必须让人一眼看出它不是主路径**。
 
 ---
 
@@ -258,10 +260,11 @@ git mv eval/pre_llamaindex/rerank_smoke.jsonl   eval/legacy/
 ```text
 ocr_confidence        OCR 链路是规划中的功能，字段是合法预留，不该删
                       （已在本文件第三节记录其 0 引用状态）
-sentence_chunker.py   用户已决定不用单句，但保留作可切换备选
 pdf_pymupdf.py        AGPL，保留为可选适配器（requirements.txt 已注释）
 docling/office 空壳    路由表里的占位契约，保留合理
 ```
+
+已删除（2026-09-21）：`sentence_chunker.py`（单句 + metadata 窗口备选）。
 
 ### 清理后验证
 

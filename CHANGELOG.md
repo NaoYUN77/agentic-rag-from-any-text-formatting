@@ -13,7 +13,7 @@
 - 新增 `pipeline/sweep_chunk_params.py`：端到端扫描（重建语料 → 建索引 → 跑评估），每个变体独立路径、不删既有目录。
 - 新增 `pipeline/sweep_ranking.py`：排序参数扫描（复用已有索引，不重建），支持 `--stages`。
 - 新增 `pipeline/tests/test_pdf_section_path.py`、`test_pdf_outline_calibration.py`、`test_heading_stack.py`、`test_artifact_id.py`。
-- `rebuild_phase0_index.py` 新增 `--chunk-tokens` / `--overlap-tokens`（此前硬编码 800/400），并把参数写进 manifest。
+- `rebuild_phase0_index.py` 新增 `--chunk-tokens`（此前硬编码 800），并把参数写进 manifest。
 - `pdf_common.py` 新增 `_OutlineMatcher`（精确优先 + 字符二元组 Jaccard 模糊兜底，阈值 0.85）与 `_calibrate_font_levels`（用 outline 实测层级校正字号排名阶梯）。
 - `ingest/models.py` 新增 `stable_artifact_id()`。
 
@@ -38,6 +38,49 @@
 
 ### Removed
 
+- **废弃整条「语义切片 / 滑动窗口」链路**（2026-09-21）。此前 overlap 与滑动窗口都属于
+  "固定切片 + 语义切片"这条探索路线，现决定整体放弃，content 先做纯固定大小切块，
+  语义方向留待后续重新讨论。删除的文件：
+
+  | 类 | 文件 | 说明 |
+  |---|---|---|
+  | LlamaIndex 固定+语义切片 | `llamaindex_fixed_semantic_splitter.py`、`llamaindex_fixed_semantic_demo.py`、`rebuild_llamaindex_corpus.py`、`ingest_markdown_corpus.py` | 产出 `redhat` collection 的那条链路 |
+  | 滑动窗口 demo | `llamaindex_window_demo.py`、`sentence_window_demo.py`、`window_sweep_demo.py`、`hybrid_chunk_demo.py` | 边界窗口 / 句窗语义微调实验 |
+  | 旧端到端管线 | `rag_pipeline.py`、`preprocess.py` | MinerU 清洗 + 语义微调，已被 Phase 0 取代 |
+  | 单句窗口切块器 | `ingest/sentence_chunker.py`（+ `--chunker sentence` 选项、`window_sentences` 参数） | 生产里最后一个"滑动窗口"机制 |
+
+  - `rag_server.py` 默认 collection 由 `redhat` / `redhat_sparse` 改为
+    `phase0_noov_dense` / `phase0_noov_sparse`，`RAG_SPARSE_ARTIFACT_DIR` 默认指向
+    `index_artifacts/phase0_noov`；启动错误提示改为指向 `rebuild_phase0_index.py`。
+  - README 的快速开始、文件树、用法示例不再引用已删脚本。
+  - `ingest/pipeline.py` 的 `ingest()` 移除 `chunker` / `window_sentences` 参数。
+  - `tests/test_format_router.py` 删除 `SentenceSplitTests` 与
+    `SentenceWindowChunkBuilderTests`（共 9 例）。
+- **把嵌入模型封装从 demo 文件抽成正式模块** `pipeline/embeddings.py`
+  （`build_embeddings` / `QwenTextEmbeddings` / `QwenVLEmbeddings` / `HashingEmbeddings` /
+  `CN_SENTENCE_SPLIT_REGEX`）。此前这些**生产基础设施**住在 `semantic_chunker_demo.py`
+  这个演示脚本里，`rag_server.py` / `rebuild_phase0_index.py` / `eval/run_eval.py` /
+  `ingest/qdrant_indexer.py` 反过来依赖一个 "demo" 文件，命名与实际角色不符。
+  抽取后 `semantic_chunker_demo.py` 本身被删除，8 个文件的 import 改为 `from embeddings import ...`。
+- **取消 chunk 的 `overlap`**（`BlockAwareHierarchicalChunkBuilder`）：移除 `overlap_tokens`
+  参数、`IndexReadyChunk.overlap_from_previous` 字段、以及 `_tail_overlap()` / `_slice_tail()`
+  两个方法。收口逻辑简化为纯粹的"造块 + 清空累积"。
+  - **原因（实测）**：overlap 分布是**双峰**的，且与 heading 精确互补 —— 有 heading 的文档
+    几乎不触发（章节本身即语义边界），无 heading 的文档则占到该文 token 的 **43%~47%**。
+    全局 14/117 chunks（12%）带 overlap，占 5,407/40,069 token（**13.5%**）。
+    重叠文本会同时进两个 chunk 的向量 → 同一内容可被双命中，挤占 `candidate_k`。
+  - **收益侧**：overlap 真正起作用的只是"接住跨块指代"，实测它携带的 2~6 句里只有第 1 句在起作用。
+  - **影响**：chunks 117 → **113**，总 token 40,069 → **34,662（−13.5%）**。
+    减少量 5,407 与独立测得的 overlap token 数**逐位相同**；各文档的片段覆盖字符数不变
+    （无内容丢失）。检索指标 **hit@5 全阶段持平**（dense 0.941 / sparse 0.765 / rrf 0.971），
+    rrf 的 recall@20 与 MRR@20 也完全一致 → **overlap 对检索质量没有可测收益，纯属成本**。
+  - `rebuild_phase0_index.py` 的 `--overlap-tokens` 已移除；manifest 仍写 `"overlap_tokens": 0`
+    以保持产物可追溯。
+- **删除滑动窗口参数 `window_tokens`**：它从未参与任何计算（只被接收并保存）。属于"语义切片"
+  的规划范围（用滑动窗口算 embedding 语义距离、在距离峰值处切分），该方向暂缓，故连同参数一并
+  删除，避免留下"看起来能用、实际是死参数"的坑。同步移除 `format_router_demo.py` 的
+  `--overlap-tokens` / `--window-tokens`，`scan_chunk_tokens.py` / `sweep_chunk_params.py`
+  的 overlap 统计与 `--overlap-ratio`。
 - **移除 `pdf_mineru` 解析器**（`pipeline/ingest/parsers/pdf_mineru.py`），PDF 路由的
   fallback 由 `[pdf_mineru, pdf_pymupdf]` 改为 `[pdf_pymupdf]`。它是唯一经
   `PDF → Markdown → Block` 中转的解析器：

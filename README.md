@@ -37,7 +37,7 @@
   MERGEABLE_TYPES 可合并: heading / text / list
   ParentNode (单 parent 多 child) / IndexReadyChunk
   fragments 字符级溯源: fragment.text == block.text[start:end]
-  overlap 回填: 二分查找尾部切片, 不切断句子
+  固定大小切块: 结构边界(heading) + 长度上限, 无 overlap
 
 [索引层] Dense + Sparse 双通道
   Dense: qwen3-vl-embedding (1024 维)
@@ -157,15 +157,17 @@ BM25 vocab       4267
 
 Chunker          BlockAwareHierarchicalChunkBuilder
 chunk_tokens     800
-overlap_tokens   400
-window_tokens    400  (注: 尚未接入 embedding 语义边界)
+overlap_tokens   0    (已取消, 见 CHANGELOG)
 candidate_k      20
 rrf_k            60
 final_top_k      5
 BM25             k1=1.2, b=0.75
 ```
 
-> `window_tokens` 目前对语义边界**无实际作用**——`_split_text_block()` 走的是 `SentenceSplitter` 的句子边界，没有 embedding 距离判定。这是 Phase 0 的已知未闭环项。
+> **overlap 已于 2026-09-21 取消**，`window_tokens`（从未参与计算的死参数）一并删除。
+> 实测 overlap 在无 heading 的文档上占该文 token 的 43%~47%，移除后检索指标
+> hit@5 全阶段持平、总 token 降 13.5%。**语义边界微调目前完全未实现**，
+> 属待办（见 `issues/09`）—— 将来若要实现，只应在无结构文档上做。
 
 公开仓库不包含第三方 PDF 和完整 Markdown 语料。语料、Qdrant 数据、索引产物和 API Key 均被 `.gitignore` 排除。
 
@@ -181,12 +183,14 @@ python -m venv .venv_rag
 $env:DASHSCOPE_API_KEY = "sk-..."
 
 # 将合法语料放入 pipeline/corpus/ 后重建索引
-.\.venv_rag\Scripts\python.exe rebuild_llamaindex_corpus.py `
-    --chunk-tokens 800 `
-    --overlap-tokens 400 `
-    --window-tokens 400
+.\.venv_rag\Scripts\python.exe -m rebuild_phase0_index `
+    --backend qwen `
+    --out-dir rebuilt_phase0 `
+    --artifact-dir index_artifacts/phase0 `
+    --dense-collection phase0_dense `
+    --sparse-collection phase0_sparse
 
-# 启动服务
+# 启动服务（默认读 phase0_noov_* 集合, 可用 RAG_DENSE_COLLECTION 覆盖）
 .\.venv_rag\Scripts\python.exe -m uvicorn rag_server:app `
     --host 127.0.0.1 --port 8000
 ```
@@ -348,26 +352,18 @@ pipeline\
 ├── .venv_rag\              虚拟环境(Python 3.12 + 全部依赖)
 ├── .dashscope_key          百炼 API Key 文件(占位符, 未使用)
 │
-├── rag_pipeline.py         ★ 完整流程: 清洗 → 分块 → 向量化 → 入库 → 检索
+├── embeddings.py            ★ 嵌入模型封装 (local / qwen / openai 三后端)
+├── rebuild_phase0_index.py  ★ Phase 0 全量重建 dense + sparse (当前建库入口)
 ├── sparse_pipeline_demo.py  ★ 独立 sparse: PDF/MD → 清洗 → jieba → BM25 → top-k
 ├── hybrid_retriever.py      ★ dense + sparse + RRF
 ├── generation.py            ★ retrieval context → Qwen answer + citations
-├── reranker.py              ★ RRF 候选 → gte-rerank-v2
-├── ingest_markdown_corpus.py ★ 增量 Markdown → dense/sparse Qdrant
-├── rebuild_llamaindex_corpus.py ★ LlamaIndex 全量重建 dense/sparse
+├── reranker.py              ★ RRF 候选 → qwen3.7-text-rerank
 ├── format_router_demo.py    ★ URL/文件 -> Block JSON CLI
 ├── ingest/                  ★ 格式路由器与 parser adapters
-│   └── chunker.py           ★ Block-aware Hierarchical ChunkBuilder
-├── semantic_chunker_demo.py  语义分块主程序
-├── hybrid_chunk_demo.py      四种分块策略对比
-├── window_sweep_demo.py      边界窗口宽度 sweep
+│   └── chunker.py           ★ Block-aware Hierarchical ChunkBuilder (固定大小, 无 overlap)
 ├── embedding_mechanism_compare.py  单句 vs 窗口嵌入的 AUC 对比
 ├── embedding_config_compare.py     三种嵌入配置的成本+效果
-├── sentence_window_demo.py   句子窗口检索对照
-├── llamaindex_window_demo.py LlamaIndex 窗口机制
-├── llamaindex_fixed_semantic_splitter.py  LlamaIndex 自定义 NodeParser
-├── llamaindex_fixed_semantic_demo.py      800/400 语义切分预览
-├── pdf_loader.py             MinerU 调用 + Markdown 清洗
+├── pdf_loader.py             PDF 解析与清洗
 ├── check_dashscope_key.py    API Key 诊断
 │
 ├── corpus\                  原始素材
@@ -418,29 +414,29 @@ Python      3.12.7
 cd E:\Code\python_dev_agent_demo\pipeline
 $env:DASHSCOPE_API_KEY = "sk-..."     # 百炼 API Key
 
-# ---- 完整链路: 清洗 → 分块 → 向量化 → 入库 → 检索 ----
-.\.venv_rag\Scripts\python.exe rag_pipeline.py `
-    --md corpus/redhat_p1-20.md --max-chars 800 --window-chars 400 --rebuild
-
-# ---- 只检索(不重建索引) ----
-.\.venv_rag\Scripts\python.exe rag_pipeline.py --only-search --query "你的问题"
-
-# ---- 用 PDF 作为语料(需要 MinerU) ----
-.\.venv_rag\Scripts\python.exe rag_pipeline.py --pdf 文件.pdf --pdf-pages 1-20 --rebuild
+# ---- 完整链路: 清洗 → 固定大小切块 → 向量化 → 入库 ----
+.\.venv_rag\Scripts\python.exe -m rebuild_phase0_index `
+    --backend qwen `
+    --out-dir rebuilt_phase0 `
+    --artifact-dir index_artifacts/phase0 `
+    --dense-collection phase0_dense `
+    --sparse-collection phase0_sparse
 ```
 
 **其它脚本:**
 
 ```powershell
-# 语义分块(不联网的验证版)
-.\.venv_rag\Scripts\python.exe semantic_chunker_demo.py --backend local
+# 格式路由预览: URL/文件 -> Block JSON (不建库)
+.\.venv_rag\Scripts\python.exe format_router_demo.py --url https://example.com/doc
 
-# 语义分块(真实模型)
-.\.venv_rag\Scripts\python.exe semantic_chunker_demo.py
-
-# 五种策略对比
-.\.venv_rag\Scripts\python.exe hybrid_chunk_demo.py --max-chars 800 --window 4
-.\.venv_rag\Scripts\python.exe window_sweep_demo.py
+# 检索评估(dense/sparse/rrf 零成本; rerank 会消耗额度)
+.\.venv_rag\Scripts\python.exe -m eval.run_eval `
+    --qrels eval/qrels/phase0_url_draft.jsonl `
+    --chunks rebuilt_phase0/*/chunks.jsonl `
+    --artifact-dir index_artifacts/phase0 `
+    --dense-collection phase0_dense `
+    --sparse-collection phase0_sparse `
+    --stages dense,sparse,rrf
 
 # 嵌入机制对比
 .\.venv_rag\Scripts\python.exe embedding_mechanism_compare.py
