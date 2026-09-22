@@ -19,6 +19,16 @@
 
 ### Changed
 
+- **清洗阶段丢弃 PDF 目录（TOC）块**（`ingest/cleaner.py`）：新增 `is_toc_block()`，
+  判据是「多级编号 + 标题 + 结尾页码」，实测该 PDF 的目录块命中率 0.79（31/39 行），
+  其余 125 个 block 全部 < 0.2 —— 零误报。
+  目录是纯导航内容，留在索引里只会制造假命中（查「KEEPALIVED 概述」命中目录条目
+  而非正文）；实测该块 5300 字符、会参与召回。
+  ⚠️ 两个防误判要点：① 要求 `(\.[0-9]+)+` 至少一层，否则会把有序列表
+  （`1. 第一步`）误判成目录；② 丢内容必须留痕 —— `clean_artifact()` 会往
+  `artifact.warnings` 写 `dropped_toc_blocks: <id>`。
+  **URL 语料不受影响**（chunk_id 序列逐位一致）—— 只作用于 PDF。
+  新增 `tests/test_cleaner.py`（7 例）。见 `issues/12`。
 - **parent 分组改用完整 `section_path`**（`chunker._scope()`）：原实现只取
   `section_path[0]`，实测在两类文档上退化 —— ① 顶层只有一个标题时（如
   `openai_scaling_storage` 的 9 个章节全挂在同一个 lv1 下）第一层恒为同一个值；
