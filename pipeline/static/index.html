@@ -106,6 +106,28 @@
     border:1px solid var(--line); background:var(--bg);
     border-radius:4px; padding:3px 8px;
   }
+  /* ---- 拒答 ---- */
+  .abstain{
+    background:#fffbeb; border:1px solid #f2dfa0; color:#78350f;
+    border-radius:var(--radius); margin-bottom:14px; overflow:hidden;
+  }
+  .abstain-head{
+    display:flex; align-items:center; gap:10px;
+    padding:11px 14px; border-bottom:1px solid #f2dfa0;
+    background:#fef3c7; font-weight:650;
+  }
+  .abstain-body{padding:12px 14px; font-size:13px}
+  .abstain-body .kv{
+    font-variant-numeric:tabular-nums; font-weight:650;
+  }
+  .gate{
+    font-variant-numeric:tabular-nums; font-size:12.5px;
+    border-radius:4px; padding:1px 7px; border:1px solid var(--line);
+    background:var(--bg); color:var(--muted);
+  }
+  .gate.pass{color:#0f766e; background:var(--accent-weak); border-color:#b7ded9}
+  .gate.fail{color:var(--hi); background:var(--hi-bg); border-color:#f2dfa0}
+  .gate.off{opacity:.65}
 
 </style>
 </head>
@@ -202,10 +224,13 @@ async function loadInfo(){
   try{
     const r = await fetch("/api/info");
     const d = await r.json();
+    const ab = d.abstain_enabled
+      ? `拒答阈值 <b>${Number(d.abstain_threshold).toFixed(4)}</b>`
+      : `拒答 <b>关闭</b>`;
     $("info").innerHTML =
       `集合 <b>${esc(d.collection)}</b> · ${d.points_count} 个点 · ` +
       `sparse <b>${esc(d.sparse_collection)}</b> ${d.sparse_points_count} 点 · ` +
-      `${d.vector_size} 维 · ${esc(d.distance)} · <b>${esc(d.model)}</b>`;
+      `${d.vector_size} 维 · ${esc(d.distance)} · <b>${esc(d.model)}</b> · ${ab}`;
   }catch(e){
     $("info").textContent = "无法连接服务";
   }
@@ -215,6 +240,25 @@ async function loadInfo(){
     $("seclist").innerHTML = d.sections
       .map(s => `<option value="${esc(s)}">`).join("");
   }catch(e){}
+}
+
+// 拒答闸门的小标签：显示 top-1 相似度 / 阈值 / 判定。
+// 关闭时也要显示分数 —— 否则用户没法判断"要是开了会不会被拒"。
+function gateChip(d){
+  const thr = d.abstain_threshold;
+  const s = d.dense_top_score;
+  if (thr === null || thr === undefined || thr <= 0){
+    return s === null || s === undefined
+      ? `<span class="gate off">拒答关闭</span>`
+      : `<span class="gate off">top1 ${s.toFixed(3)} · 拒答关闭</span>`;
+  }
+  if (s === null || s === undefined){
+    return `<span class="gate off">无 top1（${esc(d.mode)} 未跑 dense）</span>`;
+  }
+  const pass = s >= thr;
+  return `<span class="gate ${pass ? "pass" : "fail"}">` +
+         `top1 ${s.toFixed(3)} ${pass ? "≥" : "<"} 阈值 ${thr.toFixed(4)}` +
+         ` → ${pass ? "作答" : "拒答"}</span>`;
 }
 
 async function doSearch(){
@@ -279,7 +323,8 @@ function render(d){
       `模型 <b>${esc(d.model)}</b>` +
       ` · Rerank <b>${d.rerank_applied ? "已启用" : "未启用"}</b>` +
       (d.rerank_ms ? ` (${d.rerank_ms} ms)` : "") +
-      (d.filtered ? ` · <b>已过滤</b>` : "");
+      (d.filtered ? ` · <b>已过滤</b>` : "") +
+      ` · ` + gateChip(d);
   } else {
     $("stats").innerHTML =
       `查询 <b>${esc(d.query)}</b> · 模式 <b>${esc(modeLabels[mode] || mode)}</b> · ` +
@@ -290,7 +335,8 @@ function render(d){
       `返回 <b>${d.hits.length}</b> 条 · ` +
       `top1-top2 分差 <b class="${marginCls}">${marginTxt}</b>` +
       (marginCls ? ` <span class="warn">（几乎并列，排序不确定）</span>` : "") +
-      (d.filtered ? ` · <b>已过滤</b>` : "");
+      (d.filtered ? ` · <b>已过滤</b>` : "") +
+      ` · ` + gateChip(d);
     if (d.rerank_error) {
       $("stats").innerHTML += `<br><span class="warn">Rerank 失败，已回退 RRF：${esc(d.rerank_error)}</span>`;
     }
@@ -301,7 +347,19 @@ function render(d){
     return;
   }
 
-  const answerHtml = d.answer ? `
+  // 拒答时用**独立的样式** —— 它不是一个"回答"，而是一次有意的拒绝。
+  // 混在正常答案里会让人以为系统真的答了。
+  const thr = d.abstain_threshold, s = d.dense_top_score;
+  const answerHtml = d.answer ? (d.abstained ? `
+    <div class="abstain">
+      <div class="abstain-head">已拒答 · 未调用生成模型</div>
+      <div class="abstain-body">
+        检索到的最高相关度 <span class="kv">${(s ?? 0).toFixed(3)}</span>
+        低于阈值 <span class="kv">${(thr ?? 0).toFixed(4)}</span>，
+        判定为「语料里没有能回答这个问题的内容」，因此不作答。
+        <br><br>${esc(d.answer)}
+      </div>
+    </div>` : `
     <div class="answer">
       <div class="answer-head"><span>回答</span><span>${esc(d.model)}</span></div>
       <div class="answer-body">${formatAnswer(d.answer)}</div>
@@ -311,7 +369,7 @@ function render(d){
             [C${c.index}] ${esc(c.file_name || "unknown")} · p${c.page ?? "?"}
           </span>`).join("")}
       </div>
-    </div>` : "";
+    </div>`) : "";
 
   $("out").innerHTML = answerHtml + d.hits.map((h, i) => `
     <div class="hit ${i === 0 ? "top" : ""}">
