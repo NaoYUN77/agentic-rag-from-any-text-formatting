@@ -235,6 +235,19 @@
 
 ### Fixed
 
+- **测试因缺 `fastapi` 而在 CI 整体失败**：`tests/test_abstain.py` import 了
+  `rag_server`，而 `rag_server` 顶部 `from fastapi import ...` ——
+  CI 只装 Phase 0 的 8 个包（llama-index-core / trafilatura / bs4 / markdownify /
+  lxml / readability-lxml / qdrant-client / jieba），**没有 fastapi**，
+  于是整个测试套件 error（本地却全过，因为本地 venv 装了全部依赖）。
+  **修法不是往 CI 塞 fastapi** —— 拒答判定本身是纯函数，不该绑在 Web 框架上。
+  抽成 `pipeline/abstention.py`（`should_abstain` / `load_threshold` /
+  `ABSTAIN_ANSWER`），`rag_server` 改为 import 它们。
+  顺带改进：`should_abstain` 现在**显式收阈值参数**，测试不用再
+  `patch("rag_server.ABSTAIN_THRESHOLD")` —— 那种写法本身就说明逻辑与配置耦合了。
+  新增 `NoHeavyImportTests` 断言该测试文件不把 `rag_server` / `fastapi`
+  拖进 `sys.modules`。验证：模拟 CI 屏蔽 fastapi / pydantic / uvicorn 后
+  跑 6 个测试文件，`ran=88 errors=0 failures=0`。
 - **评估器 `--stages` 只请求下游阶段时静默给 0 分**（`eval/run_eval.py`）：
   `union` / `rrf` / `rerank` 都拿 dense + sparse 当输入，但 dense/sparse 只在
   **自己出现在 `--stages` 里**时才被计算。于是 `--stages rrf` 会拿两个空列表做融合，

@@ -31,6 +31,7 @@ from embeddings import build_embeddings
 from hybrid_retriever import HybridRetriever
 from generation import QwenChatGenerator
 from reranker import build_reranker
+from abstention import ABSTAIN_ANSWER, load_threshold, should_abstain
 
 QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
 # 默认指向 Phase 0 的当前索引（固定大小切块、无 overlap、
@@ -45,56 +46,12 @@ SPARSE_ARTIFACT_DIR = Path(os.getenv(
 ))
 STATIC_DIR = Path(__file__).parent / "static"
 
-# ---- 拒答阈值 ----
-# 判据：**query 的 dense top-1 余弦相似度**低于阈值 -> 判为「语料里没有答案」。
-# 0 = 关闭（默认），保持原有行为不变。
-#
-# ⚠️ 这个阈值是「语料 + 嵌入模型」绑定的，换任一个都必须**重新标定** ——
-# 它不是通用常数。标定方法见 `eval/run_eval.py` 的「拒答能力」一节：
-# 用 qrels 里的 unanswerable 负样本，取「误拒为 0 的前提下抓住最多负样本」的切点。
-#
-# 当前语料（phase0_capped，39 条 qrels）标定结果：
-#   可回答 n=34  min=0.528  p50=0.672 ；负样本 n=5  min=0.382  p50=0.487
-#   推荐 0.5285 -> 拒答 3/5，误拒 0/34
-# ⚠️ 两类分布有重叠（负样本 max 0.598 > 可回答 min 0.528），只能拒掉一部分。
-def _load_abstain_threshold(
-    env_raw: Optional[str] = None,
-    threshold_file: Optional[Path] = None,
-) -> float:
-    """拒答阈值：环境变量优先，其次读标定脚本写的 `.abstain_threshold`。
-
-    为什么要支持文件：阈值是「语料 + 嵌入模型」绑定的，换任一个都得重算。
-    只靠环境变量的话，重算完还得手工搬一次数字，很容易忘 ——
-    然后线上就带着**过期阈值**跑（症状是「明明有答案却被拒答」，极难归因）。
-    用 `calibrate_abstain.py --write` 写文件，服务自动跟着走。
-
-    两个来源都是参数（默认取真实来源），便于单测。
-    """
-    if env_raw is None:
-        env_raw = os.getenv("RAG_ABSTAIN_THRESHOLD")
-    if env_raw is not None and env_raw.strip():
-        try:
-            return float(env_raw)
-        except ValueError:
-            print("[启动] ⚠️ RAG_ABSTAIN_THRESHOLD=%r 不是数字，按 0（关闭）处理"
-                  % env_raw)
-            return 0.0
-    if threshold_file is None:
-        threshold_file = Path(__file__).parent / ".abstain_threshold"
-    if threshold_file.exists():
-        try:
-            return float(threshold_file.read_text(encoding="utf-8").strip())
-        except (ValueError, OSError):
-            return 0.0
-    return 0.0
-
-
-ABSTAIN_THRESHOLD = _load_abstain_threshold()
-
-ABSTAIN_ANSWER = (
-    "语料里没有找到足以回答这个问题的内容。"
-    "（当前检索到的最高相关度低于拒答阈值，为避免编造答案，这里不作答。）"
-)
+# ---- 拒答 ----
+# 判定逻辑抽在 abstention.py（纯函数，不依赖 fastapi）——
+# 放在这里会让任何想用它的地方（脚本 / 评估 / 测试）都被迫拖上
+# 一整套 Web 依赖。CI 里撞过：测试只 import 了一下这个模块就整体失败。
+# 阈值是「语料 + 嵌入模型」绑定的，换任一个都要用 calibrate_abstain.py 重算。
+ABSTAIN_THRESHOLD = load_threshold()
 
 _state: Dict[str, Any] = {}
 
@@ -353,18 +310,6 @@ def _retrieve_with_rerank(req: SearchRequest, limit: int) -> tuple:
     return result, hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error
 
 
-def _should_abstain(dense_top_score: Optional[float]) -> bool:
-    """相关度过低则拒答。
-
-    阈值 0（默认）时**恒为 False** —— 不设阈值就完全保持原有行为。
-    `dense_top_score is None` 也返回 False（例如 mode=sparse 没跑 dense）——
-    **判据缺失时宁可作答，也不要在没依据的情况下拒答**。
-    """
-    if ABSTAIN_THRESHOLD <= 0 or dense_top_score is None:
-        return False
-    return dense_top_score < ABSTAIN_THRESHOLD
-
-
 @app.post("/api/search", response_model=SearchResponse)
 def search(req: SearchRequest) -> SearchResponse:
     result, result_hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error = (
@@ -398,7 +343,7 @@ def search(req: SearchRequest) -> SearchResponse:
         rerank_error=rerank_error,
         sparse_known_terms=result.get("known_terms", []),
         sparse_unknown_terms=result.get("unknown_terms", []),
-        abstained=_should_abstain(dense_top),
+        abstained=should_abstain(dense_top, ABSTAIN_THRESHOLD),
         abstain_threshold=ABSTAIN_THRESHOLD,
         dense_top_score=dense_top,
     )
@@ -420,7 +365,7 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     ]
 
     dense_top = result.get("dense_top_score")
-    abstained = _should_abstain(dense_top)
+    abstained = should_abstain(dense_top, ABSTAIN_THRESHOLD)
 
     # 拒答时**不调用生成模型** —— 这正是拒答的意义：省一次 LLM 调用，
     # 也避免它对着不相关的上下文硬编一个答案出来。
