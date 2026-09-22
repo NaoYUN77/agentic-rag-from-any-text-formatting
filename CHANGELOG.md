@@ -4,6 +4,17 @@
 
 ### Added
 
+- **拒答阈值标定脚本**（`calibrate_abstain.py`）：阈值是「语料 + 嵌入模型」绑定的，
+  换任一个都必须重算。写死在代码里就会变成一个没人敢动的魔法数字 ——
+  而且换了语料之后**它是错的**却没人发现（症状是「明明语料里有答案却被拒答」，
+  很难归因到这里）。脚本把它做成一条命令：读 qrels 的负样本、跑一遍 dense 检索、
+  按「**误拒为 0 的前提下抓住最多负样本**」给出推荐阈值。
+  **与评估器共用同一个函数**（`eval.run_eval.abstention_analysis`），
+  所以两边不会出现定义漂移（实测两边都给出 `0.5285`）。
+  `--write` 写入 `pipeline/.abstain_threshold`（gitignored），
+  服务在未设 `RAG_ABSTAIN_THRESHOLD` 时会读它 —— 标定到生效一步到位。
+  环境变量始终优先于文件；环境变量填错或文件损坏都退化为「关闭」而不是崩溃。
+  新增 `LoadThresholdTests`（5 例）。
 - **FastAPI 服务新增拒答能力**（`rag_server.py`，`RAG_ABSTAIN_THRESHOLD`）：
   此前拒答阈值只存在于评估报告里（`eval/run_eval.py` 的「拒答能力」一节），
   **生产链路没有任何拒答逻辑** —— 不管问什么都会硬答。

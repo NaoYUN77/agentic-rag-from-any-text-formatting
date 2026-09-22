@@ -57,7 +57,39 @@ STATIC_DIR = Path(__file__).parent / "static"
 #   可回答 n=34  min=0.528  p50=0.672 ；负样本 n=5  min=0.382  p50=0.487
 #   推荐 0.5285 -> 拒答 3/5，误拒 0/34
 # ⚠️ 两类分布有重叠（负样本 max 0.598 > 可回答 min 0.528），只能拒掉一部分。
-ABSTAIN_THRESHOLD = float(os.getenv("RAG_ABSTAIN_THRESHOLD", "0"))
+def _load_abstain_threshold(
+    env_raw: Optional[str] = None,
+    threshold_file: Optional[Path] = None,
+) -> float:
+    """拒答阈值：环境变量优先，其次读标定脚本写的 `.abstain_threshold`。
+
+    为什么要支持文件：阈值是「语料 + 嵌入模型」绑定的，换任一个都得重算。
+    只靠环境变量的话，重算完还得手工搬一次数字，很容易忘 ——
+    然后线上就带着**过期阈值**跑（症状是「明明有答案却被拒答」，极难归因）。
+    用 `calibrate_abstain.py --write` 写文件，服务自动跟着走。
+
+    两个来源都是参数（默认取真实来源），便于单测。
+    """
+    if env_raw is None:
+        env_raw = os.getenv("RAG_ABSTAIN_THRESHOLD")
+    if env_raw is not None and env_raw.strip():
+        try:
+            return float(env_raw)
+        except ValueError:
+            print("[启动] ⚠️ RAG_ABSTAIN_THRESHOLD=%r 不是数字，按 0（关闭）处理"
+                  % env_raw)
+            return 0.0
+    if threshold_file is None:
+        threshold_file = Path(__file__).parent / ".abstain_threshold"
+    if threshold_file.exists():
+        try:
+            return float(threshold_file.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            return 0.0
+    return 0.0
+
+
+ABSTAIN_THRESHOLD = _load_abstain_threshold()
 
 ABSTAIN_ANSWER = (
     "语料里没有找到足以回答这个问题的内容。"

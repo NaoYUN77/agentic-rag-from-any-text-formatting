@@ -9,6 +9,7 @@ r"""拒答（abstention）测试。
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +19,45 @@ if str(_PIPELINE) not in sys.path:
     sys.path.insert(0, str(_PIPELINE))
 
 from hybrid_retriever import RetrievalHit, _top_dense  # noqa: E402
-from rag_server import _should_abstain  # noqa: E402
+from rag_server import _load_abstain_threshold, _should_abstain  # noqa: E402
+
+
+class LoadThresholdTests(unittest.TestCase):
+    """阈值来源：环境变量 > 标定文件 > 0（关闭）。
+
+    支持文件是为了让「标定 -> 生效」一步到位。只靠环境变量的话，
+    重算完还得手工搬数字，很容易忘 —— 然后线上带着**过期阈值**跑，
+    症状是「明明有答案却被拒答」，极难归因。
+    """
+
+    def test_env_wins_over_file(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / ".abstain_threshold"
+            f.write_text("0.5285\n", encoding="utf-8")
+            self.assertEqual(_load_abstain_threshold("0.9", f), 0.9)
+
+    def test_falls_back_to_file(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / ".abstain_threshold"
+            f.write_text("0.5285\n", encoding="utf-8")
+            self.assertEqual(_load_abstain_threshold("", f), 0.5285)
+
+    def test_no_source_means_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / ".abstain_threshold"
+            self.assertEqual(_load_abstain_threshold("", missing), 0.0)
+
+    def test_invalid_env_does_not_crash(self) -> None:
+        """环境变量填错不该让服务起不来 —— 退化成关闭，并打一行警告。"""
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / ".abstain_threshold"
+            self.assertEqual(_load_abstain_threshold("abc", missing), 0.0)
+
+    def test_garbage_file_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / ".abstain_threshold"
+            f.write_text("not-a-number\n", encoding="utf-8")
+            self.assertEqual(_load_abstain_threshold("", f), 0.0)
 
 
 class TopDenseTests(unittest.TestCase):
