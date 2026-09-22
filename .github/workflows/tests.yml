@@ -8,6 +8,16 @@ on:
   pull_request:
 
 jobs:
+  # 最小依赖闸。
+  #
+  # 故意只装 Phase 0 核心包, 不装 fastapi / pydantic / uvicorn。
+  # 目的不是省时间, 而是把一条不变量变成机器可验证的:
+  #   ingest / chunker / cleaner / eval 不得依赖服务端依赖。
+  # 一旦某个测试 import 了 rag_server, 本地 venv(装齐全部依赖)永远是绿的,
+  # 只有这里会红 —— 这是本仓库唯一能发现"依赖边界被破坏"的地方。
+  #
+  # 因此: 新测试若需要 fastapi/pydantic, 应把纯逻辑抽成独立模块
+  # (参考 pipeline/abstention.py), 而不是往下面这个清单里加包。
   phase0-tests:
     runs-on: ubuntu-latest
 
@@ -26,7 +36,7 @@ jobs:
           cache: pip
           cache-dependency-path: pipeline/requirements.txt
 
-      - name: Install Phase 0 dependencies
+      - name: Install Phase 0 core dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install \
@@ -38,6 +48,38 @@ jobs:
             readability-lxml \
             qdrant-client \
             jieba
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+  # 全量依赖闸。
+  #
+  # 按 requirements.txt 装齐再跑同一套测试, 补掉上面那个 job 的盲区:
+  #   - requirements.txt 是否可解析(有冲突 / 下不动的 pin)
+  #   - 清单是否漏包(测试能过靠的是传递依赖, 而不是显式声明)
+  # 与最小依赖闸并行跑, 互不阻塞。
+  phase0-deps-full:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: pipeline
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Install from requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
