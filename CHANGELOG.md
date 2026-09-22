@@ -4,6 +4,28 @@
 
 ### Added
 
+- **VoyageAI rerank 客户端**（`reranker.VoyageReranker`，模型 `rerank-2.5-lite`）：
+  百炼的 rerank 免费额度已耗尽（403 `FreeTierOnly`），改走 VoyageAI。
+  ⚠️ **两家协议不同，不能只换 URL** —— Voyage 的请求体是**扁平**的
+  （`query`/`documents`/`top_k` 在顶层），结果是 `data[]`；
+  DashScope 则是 `input.query` + `parameters.top_n`，结果在 `output.results[]`。
+  新增 `build_reranker(name)` 工厂（`voyage` / `dashscope` / `none`）；
+  `run_eval.py` 加 `--reranker`（默认 voyage，可用 `RAG_RERANKER` 覆盖），
+  `rag_server.py` 同步改走工厂。
+  自带 **429 退避重试**（Retry-After 优先，其次指数退避封顶 60s）——
+  实测该账号**未绑支付方式**时限速只有 **3 RPM / 10K TPM**，
+  一次评估要打 39 次，不重试几乎全被丢弃（实测 37/39 失败）。
+  官方限速表：绑卡后（Tier 1）是 **2000 RPM / 4M TPM**（差 667 倍），
+  且「Even with a payment method entered, the free tokens will still apply」。
+  新增 `tests/test_reranker.py`（14 例，钉住两家的请求体形状差异）。
+- **评估器新增「拒答能力（负样本）」一节**（`eval/run_eval.py`）：
+  qrels 里有 5 条 `unanswerable`，注释写着「考系统会不会硬答」，但评估器只算检索
+  指标、而检索**永远返回 top-k** —— 这个点一直没有对应的数字。
+  新增 `abstention_analysis()`，用 **top-1 的 dense 余弦相似度**定拒答阈值
+  （有界、跨查询可比；RRF 分数是排名派生的，不可比），
+  推荐阈值取「**误拒为 0** 的前提下抓住最多负样本」。
+  实测：可回答 `min=0.528 p50=0.672`，负样本 `min=0.382 p50=0.487`，
+  **阈值 0.5285 可拒答 3/5 且误拒 0/34**；两类分布有重叠，无法 100% 分开。
 - 新增 `pipeline/ingest/qdrant_indexer.py`，支持把 Phase 0 的 `artifact.json + chunks.jsonl` 写入 Qdrant。
 - dense 使用 `full_text` 生成 embedding，sparse 使用 `sparse_text` 生成 jieba + BM25 sparse vector。
 - dense 和 sparse 使用同一个稳定 point id，并把原始 `chunk_id`、`fragments`、质量和索引决策写入 payload。
