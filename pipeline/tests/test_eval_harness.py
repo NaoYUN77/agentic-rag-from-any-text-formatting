@@ -23,7 +23,59 @@ from eval.qrels import GoldSpan, QrelsError, QrelsItem  # noqa: E402
 from eval.resolve import (  # noqa: E402
     GoldResolveError, FragmentIndex, FragmentRef, normalize_text, resolve_gold,
 )
-from eval.run_eval import required_stages  # noqa: E402
+from eval.run_eval import gap_analysis, required_stages  # noqa: E402
+
+
+class GapAnalysisTests(unittest.TestCase):
+    """issue 03 的待验证项：`top1 - top2` 分差与排序可靠性的关系。
+
+    ⚠️ 用 hit@5 而不是 MRR —— 分差小天然让 MRR 偏低，拿 MRR 分析是循环论证。
+    这里把「用 hit@5」这个选择钉住。
+    """
+
+    @staticmethod
+    def row(gap, hit, mrr=0.0):
+        return {
+            "dense_score_gap": gap,
+            "stages": {"dense": {"scores": {"hit@5": hit, "mrr@20": mrr}}},
+        }
+
+    def test_insufficient_rows_returns_none(self) -> None:
+        rows = [self.row(0.1, 1.0) for _ in range(5)]
+        self.assertIsNone(gap_analysis(rows))
+
+    def test_rows_without_gap_are_skipped(self) -> None:
+        rows = [self.row(None, 1.0) for _ in range(20)]
+        self.assertIsNone(gap_analysis(rows))
+
+    def test_median_split_and_delta(self) -> None:
+        # 分差小的 6 条全不中，分差大的 6 条全中 -> delta = 1.0
+        rows = [self.row(0.001 * (i + 1), 0.0) for i in range(6)]
+        rows += [self.row(1.0 + i, 1.0) for i in range(6)]
+        out = gap_analysis(rows)
+        self.assertEqual(out["n"], 12)
+        self.assertEqual(out["low_gap"]["n"], 6)
+        self.assertEqual(out["high_gap"]["n"], 6)
+        self.assertEqual(out["low_gap"]["hit@5"], 0.0)
+        self.assertEqual(out["high_gap"]["hit@5"], 1.0)
+        self.assertEqual(out["delta"], 1.0)
+
+    def test_uses_hit_at_5_not_mrr(self) -> None:
+        """分差小但 hit@5 高时，结论必须是「分差小那组不差」。
+
+        若实现里误用了 MRR（分差小天然 MRR 低），这里会得出反向结论。
+        """
+        rows = [self.row(0.001 * (i + 1), 1.0, mrr=0.10) for i in range(6)]
+        rows += [self.row(1.0 + i, 1.0, mrr=0.99) for i in range(6)]
+        out = gap_analysis(rows)
+        self.assertEqual(out["low_gap"]["hit@5"], 1.0)      # 不是 0.10
+        self.assertEqual(out["delta"], 0.0)
+
+    def test_negative_delta_when_small_gap_is_better(self) -> None:
+        rows = [self.row(0.001 * (i + 1), 1.0) for i in range(6)]
+        rows += [self.row(1.0 + i, 0.0) for i in range(6)]
+        out = gap_analysis(rows)
+        self.assertLess(out["delta"], 0)
 
 
 class StageDependencyTests(unittest.TestCase):

@@ -158,6 +158,44 @@ def abstention_analysis(
     }
 
 
+def gap_analysis(
+    rows: Sequence[Dict[str, Any]], stage: str = "dense"
+) -> Optional[Dict[str, Any]]:
+    """按 top1-top2 分差中位数分两组，比较命中率。
+
+    issue 03 的待验证项：「分差小」和「排序错」的相关性有多强。
+
+    - 分差小那组命中率**明显更低** -> 「接近并列」是排序不可靠的信号，
+      值得对它做二次处理（例如只在低分差时上 rerank，省额度）
+    - 两组**差不多** -> 「分差小」本身无害，不用管它
+
+    ⚠️ 用 **hit@5** 而不是 MRR：分差小天然会让 MRR 偏低（top-1 与 top-2 谁在前
+    对 MRR 影响大），拿 MRR 分析等于循环论证。
+    """
+    pairs = []
+    for row in rows:
+        gap = row.get("dense_score_gap")
+        scores = ((row.get("stages") or {}).get(stage) or {}).get("scores") or {}
+        hit = scores.get("hit@5")
+        if gap is not None and hit is not None:
+            pairs.append((float(gap), float(hit)))
+    if len(pairs) < 6:
+        return None
+
+    pairs.sort(key=lambda x: x[0])
+    mid = len(pairs) // 2
+    low, high = pairs[:mid], pairs[mid:]
+    rate = lambda g: sum(h for _, h in g) / len(g)      # noqa: E731
+    return {
+        "n": len(pairs),
+        "low_gap": {"n": len(low), "hit@5": round(rate(low), 4),
+                    "gap_max": round(low[-1][0], 4)},
+        "high_gap": {"n": len(high), "hit@5": round(rate(high), 4),
+                     "gap_min": round(high[0][0], 4)},
+        "delta": round(rate(high) - rate(low), 4),
+    }
+
+
 def evaluate(
     items: Sequence[QrelsItem],
     gold_map: Dict[str, Set[str]],
@@ -241,6 +279,17 @@ def evaluate(
             if top_hit is not None and top_hit.dense_score is not None else None
         )
         row["top_dense_chunk_id"] = _chunk_id_of(top_hit) if top_hit is not None else None
+
+        # issue 03 的待验证项：「分差小」和「排序错」的相关性有多强。
+        # 记录 top-1 与 top-2 的 dense 分差 —— 分差越小越接近并列。
+        # 若分差小那组的命中率明显更低，说明「接近并列」确实是排序不可靠的信号。
+        row["dense_score_gap"] = (
+            float(dense[0].dense_score) - float(dense[1].dense_score)
+            if len(dense) >= 2
+            and dense[0].dense_score is not None
+            and dense[1].dense_score is not None
+            else None
+        )
 
         row["unknown_terms"] = unknown[:10]
         row["elapsed_ms"] = elapsed_ms
@@ -397,6 +446,40 @@ def write_report(
                     s.get("hit@5", 0), s.get("recall@5", 0), s.get("recall@20", 0),
                     s.get("mrr@20", 0), int(s.get("hit@5__n", 0)),
                 ))
+        lines.append("")
+
+    # ---- 分差 vs 排序可靠性（issue 03 的待验证项） ----
+    # issue 03 观察到"两个块分差 0.0001、基本并列"，怀疑分差小 == 排序不可靠。
+    # 这里按 top1-top2 分差的中位数分两组，比较命中率，把猜测变成数字。
+    gap = gap_analysis(per_query)
+    if gap:
+        low, high = gap["low_gap"], gap["high_gap"]
+        lines.append("## 分差与排序可靠性（issue 03 待验证项）\n")
+        lines.append("按 `top1 - top2` 的 dense 分差中位数分两组，比较 hit@5。"
+                     "用命中率而非 MRR —— 分差小天然让 MRR 偏低，拿 MRR 分析是循环论证。\n")
+        lines.append("| 分组 | n | 分差区间 | hit@5 |")
+        lines.append("|---|---|---|---|")
+        lines.append("| 分差小（接近并列） | %d | ≤ %.4f | **%.3f** |" % (
+            low["n"], low["gap_max"], low["hit@5"]))
+        lines.append("| 分差大 | %d | ≥ %.4f | **%.3f** |" % (
+            high["n"], high["gap_min"], high["hit@5"]))
+        lines.append("")
+        delta = gap["delta"]
+        # ⚠️ 每组只有十几条，0.1 量级的差异很可能只是噪声。宁可说"证据不足"，
+        # 也不要拿一个 n=17 的分组去论证"分差小就不可靠"。
+        missed = round(abs(delta) * (low["n"] if delta > 0 else high["n"]))
+        lines.append("**结论**：分差小那组 %s **%.3f**"
+                     "（约 %d 条之差）。" % (
+                         "低" if delta > 0 else "高", abs(delta), missed))
+        lines.append("")
+        if abs(delta) >= 0.25:
+            lines.append("差异够大，且方向与 issue 03 的猜测%s —— "
+                         "「接近并列」值得做二次处理（例如只在低分差时上重排，省额度）。"
+                         % ("一致" if delta > 0 else "相反"))
+        else:
+            lines.append("⚠️ **但每组只有 %d 条，这个量级的差异不足以定论。** "
+                         "想判断「分差小 = 排序不可靠」是否成立，需要更大的评估集 —— "
+                         "当前 39 条（可回答 34 条）撑不起这个结论。" % low["n"])
         lines.append("")
 
     # ---- 拒答能力（负样本） ----
