@@ -4,6 +4,14 @@
 
 ### Added
 
+- **调试界面补三处可读性**（`static/index.html`，用 playwright 实际截图核对后发现）：
+  - 命中卡片**新增来源文档 chip**（`file_name`）—— 原先卡片上根本看不出这段来自哪篇，
+    对调试是硬伤
+  - 章节为空时**显式显示「无章节」**，不再留一个空 chip（空 chip 看起来像 bug；
+    而"这块没有章节"本身是有用的信息，正是 issue 05 那个丢结构问题在界面上的显形）
+  - 章节优先显示**完整 `section_path`**（`A › B › C`），比单个 `section` 有信息量
+  - 页码为空时**不显示**，不再每张卡片挂一个无意义的 `p?`（本语料全是 HTML/MD，永远没有页）
+  - 新增 `GET /favicon.ico`（204）—— 否则调试时 console 里一直挂一条 404 红字
 - **调试界面展示拒答**（`static/index.html`）：后端加了拒答能力，但界面上看不出来 ——
   「拒答」和「正常回答」长得一样，会让人以为系统真的答了。现在：
   - 顶栏显示当前**拒答阈值**（或「关闭」）
@@ -260,6 +268,12 @@
 
 ### Fixed
 
+- **rerank 失败时返回条数不受 `top_k` 约束**（`rag_server._retrieve_with_rerank`）：
+  rerank 抛异常时 `hits` 还是**候选列表**（`rerank_candidate_k` 条，默认 20），
+  没有截回 `limit` —— 调用方要 3 条却拿到 20 条。
+  实测：`top_k=3` 时 `rerank=False` 返回 3 条、`rerank=True`（429 失败）返回 **20 条**。
+  ⚠️ 这个坑恰好在 **API 降级（限速 / 超时）时触发**，最不该出意外的时候。
+  修法：失败分支加 `hits = hits[:limit]`。修复后 3→3、5→5。
 - **抓取守卫漏掉「拦截/挑战页」**（`fetch_phase0_sources.py`）：原先只用
   `len(html) < 5000` 判断抓取是否成功，而实测 openai.com 返回的 **Cloudflare 挑战页
   有 11,414 字节**，轻松过关 → 挑战页会被当成正文写进 `experiments/_sources/`，

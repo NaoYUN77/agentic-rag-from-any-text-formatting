@@ -23,14 +23,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
 from embeddings import build_embeddings
 from hybrid_retriever import HybridRetriever
 from generation import QwenChatGenerator
-from reranker import build_reranker
+from reranker import DashScopeReranker, VoyageReranker, build_reranker
 from abstention import ABSTAIN_ANSWER, load_threshold, should_abstain
 
 QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
@@ -280,7 +280,9 @@ def _to_hit(p, rank: int, mode: str) -> Hit:
 
 def _retrieve_with_rerank(req: SearchRequest, limit: int) -> tuple:
     retriever: HybridRetriever = _state["retriever"]
-    reranker: DashScopeReranker = _state["reranker"]
+    # 具体实现由 RAG_RERANKER 决定（voyage / dashscope / none）。
+    # 注意: 原注解写的是 DashScopeReranker, 但那个名字从未导入过 —— 见 F821。
+    reranker: VoyageReranker | DashScopeReranker | None = _state["reranker"]
     candidate_limit = req.rerank_candidate_k if req.rerank else limit
 
     t0 = time.perf_counter()
@@ -305,6 +307,10 @@ def _retrieve_with_rerank(req: SearchRequest, limit: int) -> tuple:
             rerank_applied = True
         except Exception as exc:
             rerank_error = str(exc)
+            # ⚠️ 失败时 hits 还是**候选列表**（`rerank_candidate_k` 条，默认 20），
+            # 必须截回 limit —— 否则调用方要 3 条却拿到 20 条。
+            # 这个坑恰好在 API 降级（限速 / 超时）时触发，最不该出意外的时候。
+            hits = hits[:limit]
         rerank_ms = int((time.perf_counter() - t1) * 1000)
 
     return result, hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error
@@ -483,4 +489,11 @@ def index() -> FileResponse:
     if not f.exists():
         raise HTTPException(500, "static/index.html 不存在")
     return FileResponse(f)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    """空 favicon —— 否则浏览器每次访问都会 404，
+    调试界面时 console 里会一直挂一条红色的 Failed to load resource。"""
+    return Response(status_code=204)
 
