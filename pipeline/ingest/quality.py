@@ -12,7 +12,7 @@ from .models import DocumentArtifact, IndexDecision, QualityReport
 GARBLED_RE = re.compile(r"[\ufffd\u0000-\u0008\u000b\u000c\u000e-\u001f]")
 
 
-def _structural_fidelity(artifact: DocumentArtifact, blocks):
+def _structural_fidelity(artifact: DocumentArtifact, blocks, char_count: int = 0):
     """结构保真度检查 —— 返回 (metrics, flags, reasons)。
 
     **为什么需要**：质量门此前只看 token 数、长度分布、重复率、乱码率 ——
@@ -27,6 +27,8 @@ def _structural_fidelity(artifact: DocumentArtifact, blocks):
 
     判据都取「有前提才检查」，避免对本来就没结构的文档误报：
     没有 heading 的文档不该因为「层级单一」被扣分。
+
+    ⚠️ 但「完全没有 heading」是另一回事，见判据 4 —— 那是**长文**才可疑。
     """
     metrics: Dict[str, Any] = {}
     flags = []
@@ -63,6 +65,19 @@ def _structural_fidelity(artifact: DocumentArtifact, blocks):
         if with_path == 0:
             flags.append("section_path_all_empty")
             reasons.append("有标题但所有正文块的 section_path 都为空")
+
+    # 4) **长文却一个标题都没有** —— 判据 2/3 都要求「有标题才检查」，
+    #    于是 0 标题的文档反而**静默通过**。但一篇长文没有标题是可疑的：
+    #    要么源本身无结构，要么结构在抽取/转换时丢了 —— 两种都该可见。
+    #    没有标题就没有 section_path，按章节过滤和引用都无从谈起。
+    #
+    #    实测触发：3 篇 openai 文档抓不到源 HTML，回退用旧的 document.md
+    #    （markdown 解析器），其中 2 篇 7846 / 12804 字符且 0 标题；
+    #    而全部有标题的文档都 ≥ 8907 字符。阈值取 2000 字符，留足余量。
+    if char_count >= 2000 and not headings:
+        flags.append("long_document_without_headings")
+        reasons.append("%d 字符的长文没有任何标题，章节过滤与引用不可用"
+                       % char_count)
 
     return metrics, flags, reasons
 
@@ -104,7 +119,7 @@ def assess_raw_quality(artifact: DocumentArtifact) -> QualityReport:
 
     # 结构保真度：此前完全没有这一维度（见 _structural_fidelity 的说明）
     struct_metrics, struct_flags, struct_reasons = _structural_fidelity(
-        artifact, blocks)
+        artifact, blocks, char_count)
     flags.extend(struct_flags)
     reasons.extend(struct_reasons)
 

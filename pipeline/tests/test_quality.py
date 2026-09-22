@@ -25,6 +25,7 @@ STRUCT_FLAGS = (
     "pdf_without_page_numbers",
     "flat_heading_levels",
     "section_path_all_empty",
+    "long_document_without_headings",
 )
 
 
@@ -140,6 +141,49 @@ class StructuralFidelityTests(unittest.TestCase):
         self.assertLess(report.score, 1.0)
         self.assertNotEqual(report.status, "reject")   # 内容还在，仍应进索引
         self.assertTrue(report.reasons)                # 要说清楚为什么被扣
+
+
+class LongDocumentWithoutHeadingsTests(unittest.TestCase):
+    """判据 4：**长文却一个标题都没有**。
+
+    判据 2/3 都要求「有标题才检查」，于是 0 标题的文档反而**静默通过**。
+    但一篇长文没有标题是可疑的：要么源本身无结构，要么结构在抽取时丢了。
+
+    真实触发：3 篇 openai 文档抓不到源 HTML，回退用旧的 `document.md`
+    （markdown 解析器），其中 2 篇 7846 / 12804 字符且 **0 标题** ——
+    它们因此没有 section_path，按章节过滤和引用都无从谈起。
+    而全部有标题的文档都 ≥ 8907 字符。
+    """
+
+    def test_long_document_without_headings_is_flagged(self) -> None:
+        blocks = [make_block("t%d" % i, "text", "正文。" * 300) for i in range(3)]
+        report = assess_raw_quality(make_artifact(blocks))
+        self.assertIn("long_document_without_headings", report.flags)
+        self.assertTrue(any("没有任何标题" in r for r in report.reasons))
+
+    def test_short_document_without_headings_is_not_flagged(self) -> None:
+        """短文没标题很正常（一段话的便签、卡片），不该报。"""
+        blocks = [make_block("t0", "text", "很短的一段话。")]
+        report = assess_raw_quality(make_artifact(blocks))
+        self.assertNotIn("long_document_without_headings", report.flags)
+
+    def test_long_document_with_headings_is_not_flagged(self) -> None:
+        blocks = [make_block("h%d" % i, "heading", "第 %d 节" % i, level=1)
+                  for i in range(6)]
+        blocks += [make_block("t%d" % i, "text", "正文。" * 300) for i in range(3)]
+        report = assess_raw_quality(make_artifact(blocks))
+        self.assertNotIn("long_document_without_headings", report.flags)
+
+    def test_threshold_boundary(self) -> None:
+        """阈值 2000 字符：刚好够长才报。"""
+        just_under = [make_block("t0", "text", "正" * 1999)]
+        just_over = [make_block("t0", "text", "正" * 2001)]
+        self.assertNotIn(
+            "long_document_without_headings",
+            assess_raw_quality(make_artifact(just_under)).flags)
+        self.assertIn(
+            "long_document_without_headings",
+            assess_raw_quality(make_artifact(just_over)).flags)
 
 
 if __name__ == "__main__":
