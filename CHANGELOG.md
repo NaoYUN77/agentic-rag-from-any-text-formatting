@@ -251,6 +251,18 @@
 
 ### Fixed
 
+- **抓取守卫漏掉「拦截/挑战页」**（`fetch_phase0_sources.py`）：原先只用
+  `len(html) < 5000` 判断抓取是否成功，而实测 openai.com 返回的 **Cloudflare 挑战页
+  有 11,414 字节**，轻松过关 → 挑战页会被当成正文写进 `experiments/_sources/`，
+  后续解析出一篇**没有标题、没有正文**的"文档"却毫无告警。
+  （这正是 3 篇 openai 文档结构丢失的**同类**问题。）
+  新增 `_looks_like_challenge()`：在开头 30KB 里找 `just a moment` / `请稍候` /
+  `enable javascript` / `cf-challenge` / `access denied` 等特征，写盘前拦截，
+  并给出可操作的失败信息（含 title 与字节数）。**只在开头找**，避免正文里
+  偶尔提到 `captcha` 的正当文章被误杀。
+  实测：`FAIL 拿到的是拦截/挑战页而不是正文（title='请稍候…', 11414 bytes）
+  —— 换抓取方式或换语料源`，且不写盘。
+  新增 `tests/test_fetch_guard.py`（6 例，含「挑战页 padding 到 20KB 仍须被识别」）。
 - **测试因缺 `fastapi` 而在 CI 整体失败**：`tests/test_abstain.py` import 了
   `rag_server`，而 `rag_server` 顶部 `from fastapi import ...` ——
   CI 只装 Phase 0 的 8 个包（llama-index-core / trafilatura / bs4 / markdownify /

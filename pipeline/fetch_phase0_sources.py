@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -103,6 +104,31 @@ def _parse_result(stdout: str) -> str | None:
     return None
 
 
+#: 拦截/挑战页的特征串（小写比对）。命中任一即判定"这不是正文"。
+#:
+#: ⚠️ **光看大小拦不住** —— 实测 openai.com 返回的 Cloudflare 挑战页有 **11,437 字节**，
+#: 能过 `len(html) < 5000` 那道检查，于是被当成正文存了下来：
+#: 后续解析出一篇**没有标题、没有正文**的"文档"，却毫无告警。
+#: （这正是 3 篇 openai 文档结构丢失的同类问题 —— 那次是回退用了旧的
+#: `document.md`，这次差点把一个挑战页写进语料目录。）
+_CHALLENGE_MARKERS = (
+    "just a moment",
+    "请稍候",
+    "enable javascript",
+    "cf-challenge",
+    "challenge-platform",
+    "attention required",
+    "access denied",
+    "captcha",
+)
+
+
+def _looks_like_challenge(html: str) -> bool:
+    """拿到的更像拦截/挑战页而不是正文。"""
+    head = html[:30000].lower()
+    return any(m in head for m in _CHALLENGE_MARKERS)
+
+
 def fetch_one(doc: str, url: str, session: str) -> tuple[bool, str]:
     target = OUT_DIR / f"{doc}.html"
     if target.exists() and target.stat().st_size > 5000:
@@ -127,6 +153,16 @@ def fetch_one(doc: str, url: str, session: str) -> tuple[bool, str]:
         return False, f"取 HTML 失败: {(r.stdout or r.stderr)[:200]}"
     if len(html) < 5000:
         return False, f"HTML 过小 ({len(html)}), 可能被 challenge 拦住"
+    # ⚠️ 大小检查**不够**：挑战页可以有 1 万多字节（实测 openai.com）。
+    # 必须在写盘前识别出来，否则会把挑战页当正文存进语料目录，
+    # 后面解析出一篇没有标题、没有正文的"文档"却毫无告警。
+    if _looks_like_challenge(html):
+        title = ""
+        m = re.search(r"<title[^>]*>([^<]{0,60})", html, re.IGNORECASE)
+        if m:
+            title = m.group(1).strip()
+        return False, ("拿到的是拦截/挑战页而不是正文（title=%r, %d bytes）"
+                       "—— 换抓取方式或换语料源" % (title, len(html)))
 
     target.write_text(html, encoding="utf-8")
     return True, f"{len(html)} bytes"

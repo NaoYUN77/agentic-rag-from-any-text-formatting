@@ -76,8 +76,21 @@ openai_scaling_storage score 0.9959  ok（有 9 个标题）
 
 ### 仍未处理
 
-- **2 篇 openai 文档的结构无法恢复** —— 源 HTML 抓不到（`fetch_phase0_sources.py`
-  里有 URL，但 openai.com 抓取被拦）。要么换抓取方式，要么换掉这 2 篇语料。
+- **2 篇 openai 文档的结构无法恢复** —— 源 HTML 抓不到。
+  实测（2026-09-22）：重新跑 `fetch_phase0_sources.py --only openai_agents_api`，
+  openai.com 返回的是 **Cloudflare 挑战页**（`<title>请稍候…</title>`，11414 字节），
+  不是正文。**换抓取方式（如带 cookie/浏览器指纹）或换掉这 2 篇语料。**
+
+  > 对照：用 WebFetch 取同一个 URL 能拿到完整正文，且**标题结构完好**
+  > （1 个 h1 + 7 个 h2 + 3 个 h3）。所以**源页面是有结构的，是我们没抓到**。
+
+- ⚠️ **顺带修了一个抓取守卫的漏洞**（`fetch_phase0_sources.py`）：
+  原先只用 `len(html) < 5000` 判断抓取是否成功，而**挑战页有 1 万多字节**，
+  轻松过关 → 挑战页会被当成正文写进 `experiments/_sources/`，
+  后续解析出一篇**没有标题、没有正文**的"文档"却毫无告警。
+  已新增 `_looks_like_challenge()`（在开头 30KB 里找
+  `just a moment` / `请稍候` / `enable javascript` / `cf-challenge` 等特征），
+  写盘前拦截，并给出可操作的失败信息。回归测试 `tests/test_fetch_guard.py`（6 例）。
 
 ---
 
