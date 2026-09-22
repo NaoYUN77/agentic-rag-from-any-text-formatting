@@ -57,6 +57,21 @@ from eval.resolve import (
 STAGES = ["dense", "sparse", "union", "rrf", "rerank"]
 
 
+def required_stages(stages: List[str]) -> set:
+    """为了跑出请求的阶段，实际【必须计算】的底层检索阶段。
+
+    `union` / `rrf` / `rerank` 都拿 dense + sparse 当输入，所以只请求下游阶段时，
+    底层阶段也必须算出来 —— 不管它们有没有出现在 `--stages` 里。
+
+    ⚠️ 不做这件事会**静默**出错：`--stages rrf` 会拿两个空列表做融合，
+    指标全 0 却不报错，看起来像「模型效果差」。实测踩过这个坑。
+    """
+    needed = set(stages)
+    if {"union", "rrf", "rerank"} & set(stages):
+        needed |= {"dense", "sparse"}
+    return needed
+
+
 def _chunk_id_of(hit: Any) -> str:
     return str((hit.payload or {}).get("chunk_id") or "")
 
@@ -111,10 +126,16 @@ def evaluate(
             "stages": {},
         }
 
+        # dense / sparse 是 union / rrf / rerank 的输入 —— 见 required_stages()。
+        needed = required_stages(stages)
         t0 = time.perf_counter()
-        dense = retriever.dense_search(q, candidate_k) if "dense" in stages else []
+        dense = (
+            retriever.dense_search(q, candidate_k)
+            if "dense" in needed else []
+        )
         sparse, _, unknown = (
-            retriever.sparse_search(q, candidate_k) if "sparse" in stages else ([], [], [])
+            retriever.sparse_search(q, candidate_k)
+            if "sparse" in needed else ([], [], [])
         )
         fused = (
             HybridRetriever.rrf_fuse([dense, sparse], k=rrf_k, limit=candidate_k)

@@ -125,6 +125,17 @@
   至此架构中不再存在经 Markdown 中转的解析器，`parse_markdown_text` 只服务
   真正的 `.md` 输入。新增不变量测试 `test_no_markdown_transit_parser_registered`。
 
+### Fixed
+
+- **评估器 `--stages` 只请求下游阶段时静默给 0 分**（`eval/run_eval.py`）：
+  `union` / `rrf` / `rerank` 都拿 dense + sparse 当输入，但 dense/sparse 只在
+  **自己出现在 `--stages` 里**时才被计算。于是 `--stages rrf` 会拿两个空列表做融合，
+  **指标全 0 却不报错** —— 看起来像「模型效果差」。实测：单独跑 rrf 得 0.000，
+  跑全链路得 0.971。
+  新增 `required_stages()`：请求下游阶段时自动带上 dense + sparse；
+  只测 dense 时不会白跑 sparse（省一半检索开销）。
+  回归测试 `StageDependencyTests`（4 例）。
+
 ### Verified
 
 - 10 个单元与集成测试通过。

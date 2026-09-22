@@ -23,6 +23,38 @@ from eval.qrels import GoldSpan, QrelsError, QrelsItem  # noqa: E402
 from eval.resolve import (  # noqa: E402
     GoldResolveError, FragmentIndex, FragmentRef, normalize_text, resolve_gold,
 )
+from eval.run_eval import required_stages  # noqa: E402
+
+
+class StageDependencyTests(unittest.TestCase):
+    """`--stages` 的下游阶段必须自动带上 dense + sparse。
+
+    回归: 曾经只请求 `--stages rrf` 时，dense/sparse 因为不在 stages 里而不被
+    计算，rrf 拿两个空列表做融合 → **指标全 0 却不报错**，看起来像「模型效果差」。
+    实测踩过：单独跑 rrf 得 0.000，跑全链路得 0.971。
+    """
+
+    def test_downstream_pulls_in_both_retrievers(self) -> None:
+        for stage in ("union", "rrf", "rerank"):
+            with self.subTest(stage=stage):
+                need = required_stages([stage])
+                self.assertIn("dense", need)
+                self.assertIn("sparse", need)
+                self.assertIn(stage, need)
+
+    def test_dense_only_does_not_pull_sparse(self) -> None:
+        """只测 dense 时不该白跑 sparse —— 省一半检索开销。"""
+        need = required_stages(["dense"])
+        self.assertIn("dense", need)
+        self.assertNotIn("sparse", need)
+        self.assertNotIn("rrf", need)
+
+    def test_full_list_is_unchanged(self) -> None:
+        stages = ["dense", "sparse", "union", "rrf", "rerank"]
+        self.assertEqual(required_stages(stages), set(stages))
+
+    def test_empty_stages_stay_empty(self) -> None:
+        self.assertEqual(required_stages([]), set())
 
 
 class NormalizeTests(unittest.TestCase):
