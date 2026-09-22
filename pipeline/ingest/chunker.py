@@ -193,11 +193,18 @@ class BlockAwareHierarchicalChunkBuilder:
     def __init__(
         self,
         chunk_tokens: int = 800,
+        parent_tokens: int = 1600,
         strip_headings: bool = True,
     ) -> None:
         if chunk_tokens <= 0:
             raise ValueError("chunk_tokens must be greater than 0")
         self.chunk_tokens = chunk_tokens
+        # 单个 parent 的 token 上限（<=0 表示不限制）。默认 2× chunk_tokens。
+        #
+        # 有结构的分组几乎碰不到这个上限（实测 103 个 parent 的 p90 只有 745），
+        # 它主要兜住"完全无 heading 的文档整篇落进一个分组"的情况 ——
+        # 那类文档没有结构信号，只能靠尺寸约束。见 issues/10 与 _split_oversized()。
+        self.parent_tokens = parent_tokens
         # 标题是否只作 metadata 而不进 chunk 正文（见 _render_block）
         self.strip_headings = strip_headings
         self._splitter = SentenceSplitter(
@@ -438,15 +445,51 @@ class BlockAwareHierarchicalChunkBuilder:
             return IndexDecision("low", True, False, 0.0, 0.2, True, "low quality")
         return IndexDecision("reject", False, False, 0.0, 1.0, True, "reject quality")
 
+    def _split_oversized(
+        self, chunks: Sequence[IndexReadyChunk]
+    ) -> List[List[IndexReadyChunk]]:
+        """把一个分组按顺序切成若干段，每段 token 不超过 `parent_tokens`。
+
+        为什么需要：`_group_blocks()` 按 `section_path` 分组，但**完全无 heading
+        的文档没有结构信号**，整篇会落进一个分组 → parent ≈ 整篇文档
+        （实测 `openai_model_misalignment` 2378 token / 4 chunks、
+        `openai_agents_api` 1773 token / 3 chunks），
+        parent expansion 展开等于把整篇塞进 context，失去聚焦作用（见 issues/10）。
+
+        有结构的分组基本不受影响 —— 实测 103 个 parent 的 p90 只有 745 token，
+        超过 1600 的仅 2 个。
+
+        ⚠️ 单个 chunk 若自身就超预算（如 `chunk_tokens > parent_tokens`），
+        它仍会独占一段 —— chunk 不能再拆，只能让它超出。
+        """
+        if self.parent_tokens <= 0 or not chunks:
+            return [list(chunks)]
+
+        groups: List[List[IndexReadyChunk]] = []
+        cur: List[IndexReadyChunk] = []
+        total = 0
+        for chunk in chunks:
+            if cur and total + chunk.token_count > self.parent_tokens:
+                groups.append(cur)
+                cur = []
+                total = 0
+            cur.append(chunk)
+            total += chunk.token_count
+        if cur:
+            groups.append(cur)
+        return groups
+
     def build(self, artifact: DocumentArtifact) -> Tuple[List[ParentNode], List[IndexReadyChunk]]:
         parents: List[ParentNode] = []
         chunks: List[IndexReadyChunk] = []
         chunk_counter = 0
 
         for scope, blocks in self._group_blocks(artifact).items():
-            # parent_id 用"已产出的 parent 数 + 1"命名, 而不是循环序号 ——
-            # 因为整组 chunk 都可能因"正文为空"被丢弃(strip_headings 下的
-            # 纯标题分组), 那种分组不该产出空壳 parent, 也不该在编号上留洞。
+            # 这是【临时】parent_id, 只用于 _make_chunk 建 chunk 时占位;
+            # 分组跑完后会按 _split_oversized() 的结果重新编号并覆盖。
+            # 编号用"已产出的 parent 数 + 1"而不是循环序号 —— 因为整组 chunk
+            # 都可能因"正文为空"被丢弃(strip_headings 下的纯标题分组),
+            # 那种分组不该产出空壳 parent, 也不该在编号上留洞。
             parent_id = f"{artifact.artifact_id}_p{len(parents) + 1:04d}"
             parent_chunks: List[IndexReadyChunk] = []
             current: List[_Piece] = []
@@ -503,19 +546,24 @@ class BlockAwareHierarchicalChunkBuilder:
                 # 实测语料里这类分组 = 纯标题分组（如 PDF 的封面标题）。
                 continue
 
-            for chunk in parent_chunks:
-                chunk.parent_id = parent_id
+            # 一个 section 通常产出一个 parent；但若它超了 parent_tokens
+            # （典型是无 heading 的文档整篇落进一个分组），按顺序拆成多个 parent。
+            for group in self._split_oversized(parent_chunks):
+                # parent_id 必须在拆分之后才算 —— 编号依赖"已产出的 parent 数"。
+                group_id = f"{artifact.artifact_id}_p{len(parents) + 1:04d}"
+                for chunk in group:
+                    chunk.parent_id = group_id
 
-            parents.append(ParentNode(
-                parent_id=parent_id,
-                artifact_id=artifact.artifact_id,
-                scope_title=scope,
-                section_path=list(parent_chunks[0].section_path) if parent_chunks else [scope],
-                child_chunk_ids=[c.chunk_id for c in parent_chunks],
-                full_text="\n\n".join(c.full_text for c in parent_chunks),
-                token_count=sum(c.token_count for c in parent_chunks),
-                page_start=min((c.page_start for c in parent_chunks if c.page_start), default=None),
-                page_end=max((c.page_end for c in parent_chunks if c.page_end), default=None),
-            ))
+                parents.append(ParentNode(
+                    parent_id=group_id,
+                    artifact_id=artifact.artifact_id,
+                    scope_title=scope,
+                    section_path=list(group[0].section_path) or [scope],
+                    child_chunk_ids=[c.chunk_id for c in group],
+                    full_text="\n\n".join(c.full_text for c in group),
+                    token_count=sum(c.token_count for c in group),
+                    page_start=min((c.page_start for c in group if c.page_start), default=None),
+                    page_end=max((c.page_end for c in group if c.page_end), default=None),
+                ))
 
         return parents, chunks

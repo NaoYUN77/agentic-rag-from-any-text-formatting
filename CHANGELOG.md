@@ -19,6 +19,16 @@
 
 ### Changed
 
+- **清洗阶段丢弃 PDF 目录（TOC）块**（`ingest/cleaner.py`）：新增 `is_toc_block()`，
+  判据是「多级编号 + 标题 + 结尾页码」，实测该 PDF 的目录块命中率 0.79（31/39 行），
+  其余 125 个 block 全部 < 0.2 —— 零误报。
+  目录是纯导航内容，留在索引里只会制造假命中（查「KEEPALIVED 概述」命中目录条目
+  而非正文）；实测该块 5300 字符、会参与召回。
+  ⚠️ 两个防误判要点：① 要求 `(\.[0-9]+)+` 至少一层，否则会把有序列表
+  （`1. 第一步`）误判成目录；② 丢内容必须留痕 —— `clean_artifact()` 会往
+  `artifact.warnings` 写 `dropped_toc_blocks: <id>`。
+  **URL 语料不受影响**（chunk_id 序列逐位一致）—— 只作用于 PDF。
+  新增 `tests/test_cleaner.py`（7 例）。见 `issues/12`。
 - **parent 分组改用完整 `section_path`**（`chunker._scope()`）：原实现只取
   `section_path[0]`，实测在两类文档上退化 —— ① 顶层只有一个标题时（如
   `openai_scaling_storage` 的 9 个章节全挂在同一个 lv1 下）第一层恒为同一个值；
@@ -30,7 +40,16 @@
   `full_text`/`sparse_text` 逐字相同、全文集合 SHA256 相同）—— 因为 chunk 边界由
   "遇 heading 就收口"决定，而新分组恰好与 heading 边界重合，所以是**纯 metadata 改进**。
   详见 `docs/parent_grouping_scope_fix.md`、`issues/10`。
-  新索引：`index_artifacts/phase0_scope`，collections `phase0_scope_dense` / `_sparse`；
+- **新增 `parent_tokens` 参数**（默认 `1600` = 2 × `chunk_tokens`；`0` 表示不限制）：
+  完全无 heading 的文档没有结构信号，整篇会落进一个分组 → parent ≈ 整篇文档。
+  超限的分组在**跑完之后**按 chunk 顺序拆成多个 parent。实测 parent token max
+  **2378 → 1543**、>1600 token 的 parent **2 → 0**、parents 103 → 105，
+  而 **chunks / 总 token 完全不变**（全文集合 SHA256 相同）。
+  有结构的分组不受影响（p90 只有 745 token）—— 属**纯安全阀**，不是常规切分手段。
+  ⚠️ 这是 `parent expansion` 上线前的前提：没有它，`final_top_k=5` 全展开最坏
+  约 11,890 token context；有它则 ≤ 8,000。
+  新增 `--parent-tokens` CLI 与 manifest 字段。
+  新索引：`index_artifacts/phase0_capped`，collections `phase0_capped_dense` / `_sparse`；
   `rag_server.py` 默认 collection 随之更新。
 - **`artifact_id` 改为确定性派生**（`stable_artifact_id`：`final_uri` → `uri` → 内容 `sha256`，取前 12 位十六进制）。原实现 4 个 parser 都用 `uuid.uuid4()`，导致每次重建 `chunk_id` 全变，无法做增量更新与逐 chunk 对比。保持 `doc_<12hex>` 形态不变。
 - **修复 `html.py` / `markdown.py` 的 `heading_stack` bug**：弹栈条件由 `while len(stack) >= level` 改为 `while stack and stack[-1][0] >= level`（栈改存 `(level, title)`）。原写法拿"栈深度"与"heading 层级"两种量纲相比，使**同级标题被 append 成前一个同级标题的子节点**。实测 `section_path` 在 80/117 chunks (68%) 上变化，parents 16 → 54。**注意：chunk 全文未变，检索指标逐位相同** —— 该修复的价值在 metadata / 引用 / Parent expansion，不在这套检索指标上。

@@ -37,6 +37,7 @@ class IngestPipeline:
         parser_kwargs: Dict[str, Any] | None = None,
         build_chunks: bool = True,
         chunk_tokens: int = 800,
+        parent_tokens: int = 1600,
         strip_headings: bool = True,
     ) -> IngestResult:
         source: SourcePayload = load_source(
@@ -76,6 +77,7 @@ class IngestPipeline:
                         # 策略已于 2026-09-21 随"滑动窗口机制取消"一并删除。
                         builder = BlockAwareHierarchicalChunkBuilder(
                             chunk_tokens=chunk_tokens,
+                            parent_tokens=parent_tokens,
                             strip_headings=strip_headings,
                         )
                         parents, chunks = builder.build(artifact)

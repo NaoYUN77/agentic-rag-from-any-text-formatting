@@ -2,7 +2,8 @@
 
 日期：2026-09-21
 对应 issue：`issues/10_parent_grouping_degraded.md`
-状态：**已修复（有 heading 的文档）**；无 heading 文档仍待处理
+状态：**已修复**（两类退化都已处理：有 heading 的靠完整 `section_path`，
+无 heading 的靠 `parent_tokens` 上限兜底）
 
 ---
 
@@ -147,30 +148,64 @@ heading 边界重合，所以没有多切一刀。
 
 ---
 
-## 四、还没解决的（类型 B）
+## 四、无 heading 文档：用 `parent_tokens` 兜底（已实施）
 
-**完全无 heading 的文档仍退化成 1 个 parent**（`openai_agents_api` 3 chunks /
-1773 token、`openai_model_misalignment` 4 chunks）。
+`_scope()` 只能修「有结构但第一层塌缩」的情况。**完全无 heading 的文档没有结构信号**，
+整篇仍会落进一个分组（`openai_agents_api` 1773 token / 3 chunks、
+`openai_model_misalignment` 2378 token / 4 chunks）。
 
-这类文档**没有可用的结构信号**，`_scope()` 无法改善。可选方向：
+### 方案 A（已实施）：给 parent 加 token 上限
 
-```text
-方案 A：给 parent 加 token 尺寸上限
-        超限的组按顺序拆成多个 parent（如每个 ≤ 1200 token）
-        优点：同时能兜住"某个章节本身过大"的情况
-        缺点：拆出来的 parent 不再是语义完整的章节
-
-方案 B：无结构文档不产出 parent
-        让 parent expansion 回退到"相邻 chunk 拼接"
-        优点：不制造假章节
-        缺点：需要另一套扩展逻辑
-
-方案 C：保持现状
-        承认无结构文档拿不到章节级上下文
+```python
+BlockAwareHierarchicalChunkBuilder(chunk_tokens=800, parent_tokens=1600)
 ```
 
-**建议 A**：它是唯一能同时覆盖「无结构文档」和「超大章节」的规则，
-且不改变有结构文档的行为（那些 parent 已在 2378 token 以内）。
+- 默认 `parent_tokens = 1600`（= 2 × `chunk_tokens`）；传 **0 表示不限制**
+- 拆分发生在**分组跑完之后**，按 chunk 顺序切，token 数用真实值
+- 单个 chunk 若自身就超上限，它仍独占一段 —— chunk 不能再拆
+- CLI：`rebuild_phase0_index.py --parent-tokens`；manifest 记录该值
+
+### 实测效果
+
+| 指标 | 无上限 | 上限 1600 |
+|---|---:|---:|
+| parents | 103 | **105** |
+| parent token max | **2378** | **1543** |
+| > 1600 token 的 parent | 2 | **0** |
+| chunks / 总 token | 113 / 34,662 | **113 / 34,662（不变）** |
+| 全文集合 SHA256 | `88a644004646ca12` | **相同** |
+
+拆出来的结果：
+
+```text
+openai_agents_api          1773  ->  1314 + 459
+openai_model_misalignment  2378  ->  1543 + 835
+```
+
+**有结构的文档完全不受影响** —— 103 个 parent 的 p90 只有 745 token，碰不到 1600。
+所以这个上限是**纯安全阀**，不是常规切分手段。
+
+⚠️ 被拆开的 parent 不再是语义完整的章节，这是方案 A 的已知代价。
+但对无 heading 文档来说本来就没有章节可谈，用一个**有界的窗口**反而比"整篇"更实用。
+
+### 为什么没选方案 B / C
+
+```text
+方案 B（无结构文档不产出 parent）
+  -> 要另做一套"相邻 chunk 拼接"的扩展逻辑；而 parent expansion 还没实现，
+     等于把问题推给未来
+
+方案 C（保持现状，承认拿不到章节级上下文）
+  -> parent expansion 一旦上线，"整篇当 context"会把 context 撑爆：
+     5 个命中 × 2378 token ≈ 11,890 token
+```
+
+方案 A 是唯一**不引入新机制**、又能把最坏情况压住的选项。
+
+### 一个判据：parent expansion 上线前必须先有这个上限
+
+没有它，`final_top_k=5` 个命中全展开时最坏约 **11,890 token** 的 context；
+有它则上限是 **5 × 1600 = 8,000 token**。这是上限存在的**主要理由**。
 
 ---
 
@@ -188,19 +223,20 @@ python -m rebuild_phase0_index --backend qwen --out-dir rebuilt_scope_v1 --dry-r
 # 3. 重建索引
 export DASHSCOPE_API_KEY="$(cat .dashscope_key)"
 python -m rebuild_phase0_index --backend qwen \
-  --out-dir rebuilt_scope \
-  --artifact-dir index_artifacts/phase0_scope \
-  --dense-collection phase0_scope_dense \
-  --sparse-collection phase0_scope_sparse
+  --out-dir rebuilt_capped \
+  --artifact-dir index_artifacts/phase0_capped \
+  --dense-collection phase0_capped_dense \
+  --sparse-collection phase0_capped_sparse
 
 # 4. 回归测试
 python -m pytest tests/test_format_router.py -q
 ```
 
-回归测试：`tests/test_format_router.py` 新增
-`test_nested_sections_do_not_collapse_into_one_parent`。
-**注入旧 `_scope()` 后该测试失败**（实测旧实现 1 个 parent、新实现 3 个），
+回归测试：`tests/test_format_router.py` 新增两条 ——
+`test_nested_sections_do_not_collapse_into_one_parent`、
+`test_oversized_group_is_split_by_parent_tokens`。
+前者**注入旧 `_scope()` 后失败**（实测旧实现 1 个 parent、新实现 3 个），
 确认它是有效的护栏。
 
-产物：`index_artifacts/phase0_scope`，collections `phase0_scope_dense` / `phase0_scope_sparse`
-（113 chunks / **103 parents**）。
+产物：`index_artifacts/phase0_capped`，collections `phase0_capped_dense` / `phase0_capped_sparse`
+（113 chunks / **105 parents**，`chunk_tokens=800` / `parent_tokens=1600`）。

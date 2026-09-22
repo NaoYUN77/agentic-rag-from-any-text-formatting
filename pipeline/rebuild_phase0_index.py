@@ -87,6 +87,7 @@ def build_export(
     doc: str,
     out_root: Path,
     chunk_tokens: int = 800,
+    parent_tokens: int = 1600,
     strip_headings: bool = True,
 ) -> Tuple[str, Dict[str, Any]]:
     """重跑一篇, 写出 artifact/parents/chunks, 返回 (parser, 统计)。
@@ -115,6 +116,7 @@ def build_export(
 
     builder = BlockAwareHierarchicalChunkBuilder(
         chunk_tokens=chunk_tokens,
+        parent_tokens=parent_tokens,
         strip_headings=strip_headings)
     parents, chunks = builder.build(artifact)
 
@@ -143,6 +145,9 @@ def main() -> int:
     ap.add_argument("--backend", default="local", choices=["local", "qwen"])
     ap.add_argument("--chunk-tokens", type=int, default=800,
                     help="切块上限 (默认 800)。此前硬编码, 现可扫参数。")
+    ap.add_argument("--parent-tokens", type=int, default=1600,
+                    help="单个 parent 的 token 上限 (默认 1600 = 2x chunk_tokens)。"
+                         "主要兜住'无 heading 文档整篇落进一个分组'; 0 表示不限制。")
     ap.add_argument("--keep-headings", dest="strip_headings", action="store_false",
                     help="把标题渲染进 chunk 正文 (旧行为)。"
                          "默认剥离标题, 只作 metadata —— 见 chunker._render_block。")
@@ -168,6 +173,7 @@ def main() -> int:
         parser, stats = build_export(
             doc, out_root,
             chunk_tokens=args.chunk_tokens,
+            parent_tokens=args.parent_tokens,
         )
         parsers[doc] = parser
         for k, v in stats.items():
@@ -215,6 +221,7 @@ def main() -> int:
 
     manifest["embedding_backend"] = args.backend
     manifest["chunk_tokens"] = args.chunk_tokens
+    manifest["parent_tokens"] = args.parent_tokens
     # 显式记 0: overlap 已于 2026-09-21 取消（见 chunker 类 docstring）。
     # 保留该字段是为了让产物可追溯 —— 否则"这份索引到底有没有 overlap"
     # 只能靠翻代码判断，而旧索引里这个值曾是 400。
