@@ -91,11 +91,12 @@ def _parse_metrics(report_md: str) -> Dict[str, Dict[str, float]]:
 
 
 def run_variant(tag: str, chunk_tokens: int,
-                env: Dict[str, str]) -> Dict:
-    corpus = f"experiments_sweep/{tag}"
-    art_dir = f"index_artifacts/phase0_sweep_{tag}"
-    dense = f"phase0_sweep_{tag}_dense"
-    sparse = f"phase0_sweep_{tag}_sparse"
+                env: Dict[str, str], prefix: str = "",
+                no_rerank: bool = False) -> Dict:
+    corpus = f"experiments_sweep/{prefix}{tag}"
+    art_dir = f"index_artifacts/phase0_sweep_{prefix}{tag}"
+    dense = f"phase0_sweep_{prefix}{tag}_dense"
+    sparse = f"phase0_sweep_{prefix}{tag}_sparse"
 
     print("=" * 78)
     print("变体 %s : chunk_tokens=%d" % (tag, chunk_tokens))
@@ -116,12 +117,17 @@ def run_variant(tag: str, chunk_tokens: int,
 
     print("  [2/3] 跑评估 ...")
     chunk_files = [str(p) for p in sorted(Path(_HERE, corpus).glob("*/chunks.jsonl"))]
-    out = _run([PY, "-m", "eval.run_eval", "--qrels", QRELS,
-                "--chunks", *chunk_files,
-                "--artifact-dir", art_dir,
-                "--dense-collection", dense,
-                "--sparse-collection", sparse,
-                "--out-dir", "eval/runs"], env)
+    cmd = [PY, "-m", "eval.run_eval", "--qrels", QRELS,
+           "--chunks", *chunk_files,
+           "--artifact-dir", art_dir,
+           "--dense-collection", dense,
+           "--sparse-collection", sparse,
+           "--out-dir", "eval/runs"]
+    # rerank 走外部 API，有限速时 39 条要几十分钟 —— 扫参时默认关掉，
+    # 只比检索本身（块粒度影响的是召回，rerank 是它之后的独立环节）。
+    if no_rerank:
+        cmd.append("--no-rerank")
+    out = _run(cmd, env)
     m = re.search(r"报告:\s*(\S+)", out)
     report_path = m.group(1).strip() if m else None
     print("        报告: %s" % report_path)
@@ -145,6 +151,12 @@ def main() -> int:
     ap.add_argument("--variants", default="600,800,1200",
                     help="逗号分隔的 chunk_tokens 列表")
     ap.add_argument("--json-out", default="sweep_chunk_params.json")
+    ap.add_argument("--prefix", default="",
+                    help="产物目录/集合名的前缀。重跑时换个前缀避开已存在目录"
+                         "（脚本会 rmtree 输出目录，沙箱会拦已存在的）")
+    ap.add_argument("--no-rerank", action="store_true",
+                    help="评估时跳过 rerank。扫参默认建议开 —— 块粒度影响的是召回，"
+                         "rerank 是它之后的独立环节；且 rerank 走外部 API 有限速时很慢")
     args = ap.parse_args()
 
     if not os.getenv("DASHSCOPE_API_KEY"):
@@ -159,7 +171,9 @@ def main() -> int:
     results = []
     for size in sizes:
         tag = "t%d" % size
-        results.append(run_variant(tag, size, env))
+        results.append(run_variant(tag, size, env,
+                                   prefix=args.prefix,
+                                   no_rerank=args.no_rerank))
 
     # ---------------- 汇总 ----------------
     print("=" * 78)
