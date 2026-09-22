@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -91,6 +92,70 @@ def _union_order(dense: Sequence[Any], sparse: Sequence[Any]) -> List[str]:
         if cid:
             seen[cid] = seen.get(cid, 0) + rank
     return [cid for cid, _ in sorted(seen.items(), key=lambda kv: kv[1])]
+
+
+def _dist(values: Sequence[float]) -> Dict[str, float]:
+    """一组分数的分布摘要。"""
+    v = sorted(float(x) for x in values)
+    n = len(v)
+    if not n:
+        return {}
+    pick = lambda p: v[min(int(n * p), n - 1)]      # noqa: E731
+    return {
+        "n": n, "min": v[0], "p25": pick(0.25), "p50": pick(0.5),
+        "p75": pick(0.75), "max": v[-1],
+    }
+
+
+def abstention_analysis(
+    rows: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """用负样本（unanswerable）定一个「拒答阈值」。
+
+    为什么需要：qrels 里明确设计了 5 条 `unanswerable`，注释写着「考系统会不会硬答」。
+    但评估器只算检索指标，而检索**永远返回 top-k** —— 所以「会不会硬答」这个点
+    一直没有对应的数字，那 5 条等于只定义了、没被利用。
+
+    判据用 **top-1 的 dense 余弦相似度**：它有界、跨查询可比。
+    （不能用 RRF 分数 —— 它是排名派生的，不同查询之间不可比。）
+
+    若负样本分数显著低于正样本，就能在两者之间切一刀：
+    **top-1 分数低于阈值 → 拒答**。
+
+    返回 `None` 表示样本不足（没有负样本，或没跑 dense 阶段）。
+    """
+    pairs = [
+        (r.get("category"), r.get("top_dense_score"))
+        for r in rows
+        if r.get("top_dense_score") is not None
+    ]
+    pos = [s for c, s in pairs if c != "unanswerable"]
+    neg = [s for c, s in pairs if c == "unanswerable"]
+    if not pos or not neg:
+        return None
+
+    # 阈值扫描：以出现过的分数为候选切点，低于它判为拒答
+    sweep = []
+    for t in sorted(set(pos + neg)):
+        sweep.append({
+            "threshold": round(t, 4),
+            "caught_neg": sum(1 for s in neg if s < t),
+            "wrong_pos": sum(1 for s in pos if s < t),
+        })
+
+    # 推荐：**误拒为 0** 的前提下抓住尽可能多的负样本。
+    # 宁可少拒也不能误拒 —— 误拒等于把能答的问题也拒了。
+    safe = [x for x in sweep if x["wrong_pos"] == 0]
+    best = max(safe, key=lambda x: (x["caught_neg"], x["threshold"])) if safe else None
+
+    return {
+        "positive": _dist(pos),
+        "negative": _dist(neg),
+        "sweep": sweep,
+        "recommended": best,
+        # 两类完全不重叠 = 存在一个能 100% 分开的阈值
+        "separable": min(pos) > max(neg),
+    }
 
 
 def evaluate(
@@ -166,6 +231,16 @@ def evaluate(
             }
             by_stage[stage].append(scores)
             by_stage_cat[stage].setdefault(item.category, []).append(scores)
+
+        # 拒答能力分析用：top-1 的 dense 相似度。
+        # 负样本（unanswerable）的 top-1 分数若显著低于正样本，就能定一个拒答阈值。
+        # dense 没跑（只请求 sparse）时为 None，分析会跳过。
+        top_hit = dense[0] if dense else None
+        row["top_dense_score"] = (
+            float(top_hit.dense_score)
+            if top_hit is not None and top_hit.dense_score is not None else None
+        )
+        row["top_dense_chunk_id"] = _chunk_id_of(top_hit) if top_hit is not None else None
 
         row["unknown_terms"] = unknown[:10]
         row["elapsed_ms"] = elapsed_ms
@@ -324,6 +399,52 @@ def write_report(
                 ))
         lines.append("")
 
+    # ---- 拒答能力（负样本） ----
+    # qrels 里那 5 条 unanswerable 的注释写着「考系统会不会硬答」，但检索永远返回
+    # top-k，所以这个点一直没有对应的数字 —— 等于只定义了、没被利用。
+    # 这里用 top-1 的 dense 相似度（有界、跨查询可比）定一个拒答阈值。
+    abst = abstention_analysis(per_query)
+    if abst:
+        pos, neg = abst["positive"], abst["negative"]
+        lines.append("## 拒答能力（负样本）\n")
+        lines.append("判据：**top-1 的 dense 余弦相似度**（有界、跨查询可比；"
+                     "RRF 分数是排名派生的，不可比）。\n")
+        lines.append("```text")
+        fmt = "%-8s n=%-3d min=%.3f  p25=%.3f  p50=%.3f  p75=%.3f  max=%.3f"
+        lines.append(fmt % ("可回答", pos["n"], pos["min"], pos["p25"],
+                            pos["p50"], pos["p75"], pos["max"]))
+        lines.append(fmt % ("负样本", neg["n"], neg["min"], neg["p25"],
+                            neg["p50"], neg["p75"], neg["max"]))
+        lines.append("```\n")
+
+        lines.append("| query_id | top-1 相似度 | top-1 chunk |")
+        lines.append("|---|---|---|")
+        for row in per_query:
+            if row.get("category") != "unanswerable":
+                continue
+            sc = row.get("top_dense_score")
+            lines.append("| %s | %s | %s |" % (
+                row.get("query_id"),
+                "%.3f" % sc if sc is not None else "—",
+                row.get("top_dense_chunk_id") or "—",
+            ))
+        lines.append("")
+
+        rec = abst.get("recommended")
+        if rec:
+            lines.append("**推荐阈值 `%.4f`** —— top-1 相似度低于它则拒答："
+                         "正确拒答 **%d/%d** 条负样本，误拒 **%d/%d** 条可回答。"
+                         % (rec["threshold"], rec["caught_neg"], neg["n"],
+                            rec["wrong_pos"], pos["n"]))
+        else:
+            lines.append("⚠️ **没有可用阈值**：任何切点都会误拒可回答的 query。")
+        if abst.get("separable"):
+            lines.append("两类分布**完全不重叠**，存在 100%% 分开的阈值。")
+        else:
+            lines.append("⚠️ 两类分布**有重叠** —— 负样本的 top-1 分数并不总低于正样本，"
+                         "单靠相似度阈值无法完全分开。")
+        lines.append("")
+
     if resolve_notes:
         lines.append("## 解析提示\n")
         lines.append("```text")
@@ -384,6 +505,7 @@ def _build_retriever(
     items: Sequence[Any],
     gold_map: Dict[str, Set[str]],
     stages: Sequence[str],
+    reranker_name: str = "voyage",
 ):
     """构造检索器。dry-run 时返回桩, 否则连真实 Qdrant。"""
     if getattr(args, "dry_run", False):
@@ -404,8 +526,8 @@ def _build_retriever(
     )
     reranker = None
     if "rerank" in stages:
-        from reranker import DashScopeReranker
-        reranker = DashScopeReranker.from_env()
+        from reranker import build_reranker
+        reranker = build_reranker(reranker_name)
     return retriever, reranker, client
 
 
@@ -425,6 +547,8 @@ def main() -> None:
     ap.add_argument("--rrf-k", type=int, default=60)
     ap.add_argument("--stages", default=",".join(STAGES),
                     help="逗号分隔, 默认全部五阶段")
+    ap.add_argument("--reranker", default=os.getenv("RAG_RERANKER", "voyage"),
+                    help="voyage (rerank-2.5-lite, 默认) / dashscope / none")
     ap.add_argument("--no-rerank", action="store_true")
     ap.add_argument("--dry-run", action="store_true",
                     help="用桩检索器验证 harness 本身（不调 API, 指标应完美）")
@@ -472,7 +596,8 @@ def main() -> None:
     from embeddings import build_embeddings
     from hybrid_retriever import HybridRetriever
 
-    retriever, reranker, client = _build_retriever(args, items, gold_map, stages)
+    retriever, reranker, client = _build_retriever(
+        args, items, gold_map, stages, reranker_name=args.reranker)
     if args.dry_run:
         print("模式       : DRY-RUN（桩检索器, 指标应完美）")
     elif reranker is not None:

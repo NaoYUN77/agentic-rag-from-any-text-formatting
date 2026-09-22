@@ -30,7 +30,7 @@ from qdrant_client import QdrantClient
 from embeddings import build_embeddings
 from hybrid_retriever import HybridRetriever
 from generation import QwenChatGenerator
-from reranker import DashScopeReranker
+from reranker import build_reranker
 
 QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
 # 默认指向 Phase 0 的当前索引（固定大小切块、无 overlap、
@@ -83,8 +83,12 @@ async def lifespan(app: FastAPI):
     _state["generator"] = QwenChatGenerator.from_env()
     print("[启动] 生成模型:", _state["generator"].model)
     print("[启动] 初始化 Reranker ...")
-    _state["reranker"] = DashScopeReranker.from_env()
-    print("[启动] Reranker:", _state["reranker"].model)
+    # RAG_RERANKER: voyage (rerank-2.5-lite, 默认) / dashscope / none
+    _state["reranker"] = build_reranker(os.getenv("RAG_RERANKER", "voyage"))
+    if _state["reranker"] is None:
+        print("[启动] Reranker: 已关闭（RAG_RERANKER=none）")
+    else:
+        print("[启动] Reranker:", _state["reranker"].model)
     print("[启动] 就绪")
 
     yield
