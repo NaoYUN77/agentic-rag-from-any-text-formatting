@@ -4,6 +4,82 @@
 
 ### Added
 
+- **块粒度扫描修好后第一次跑出有效数字**（`sweep_chunk_params.py`）：
+  旧版 `sweep_chunk_params.json`（2026-09-20）里 600/800/1200 三个变体的
+  五个阶段**全是 0.0** —— 根因是 `_parse_metrics` 全文扫行取表格，
+  而报告里「分阶段指标」和「分阶段 × 类别」两张表的阶段名重复，
+  后者含 `unanswerable` 行（全 0），**后出现的把真实值覆盖掉了**。
+  修复是「先切出『分阶段指标』这一节再解析」，本次是修好后第一次真跑。
+
+  实测（10 篇语料 / 39 条 qrels / `--no-rerank`）：
+
+  | chunk_tokens | chunks | dense hit@5 | rrf hit@5 | dense MRR@20 | rrf MRR@20 |
+  |---|---:|---:|---:|---:|---:|
+  | 400 | 149 | 0.941 | 0.971 | 0.774 | 0.721 |
+  | 600 | 127 | 0.941 | 0.971 | 0.785 | 0.754 |
+  | **800** | 113 | 0.941 | 0.971 | **0.803** | **0.801** |
+  | 1200 | 106 | 0.941 | 0.971 | 0.744 | 0.747 |
+
+  **两个结论**：① 块粒度只影响「排得好不好」，不影响「召不召得到」
+  （hit@5 四个粒度逐位相同）；② 关系是**倒 U 而非单调** —— 800 最优，
+  往两边都变差。这否定了 issue 03「缩小块粒度减少稀释」的隐含假设：
+  稀释只是两个反向力之一，块太小会切断上下文与指代。
+  `sweep_chunk_params.py` 新增 `--prefix`（重跑避开已存在目录）与
+  `--no-rerank`（扫参不该被外部限速拖住）。新增 `tests/test_sweep_parse.py`（4 例）。
+- **评估器新增「分差与排序可靠性」一节**（`eval/run_eval.py::gap_analysis`）：
+  issue 03 观察到「两个块分差 0.0001、基本并列」，怀疑分差小 == 排序不可靠。
+  按 `top1 - top2` 的 dense 分差中位数分两组比较命中率，把猜测变成数字。
+  实测（39 条 / 可回答 34 条）：分差小组（≤0.0429，n=17）hit@5 **0.882**，
+  分差大组（≥0.0470，n=17）**1.000**，差 0.118（约 2 条）——
+  **方向与猜测一致，但每组仅 17 条，不足以定论**。
+  ⚠️ 必须用 **hit@5** 而不是 MRR：分差小天然让 MRR 偏低（top-1 与 top-2 谁在前
+  对 MRR 影响大），拿 MRR 分析等于**循环论证**；回归测试把这点钉住了。
+  新增 `GapAnalysisTests`（5 例）。
+- **质量门新增「结构保真度」维度**（`ingest/quality.py::_structural_fidelity`）：
+  此前质量门只看 token 数、长度分布、重复率、乱码率 —— 对「结构丢了」完全无感。
+  issues 11/12 的三次回归（heading 层级被压平、`section_path` 大面积为空、
+  PDF 页码完全丢失）当时**一个都没被发现** —— 一本讲配置的手册丢了全部配置示例，
+  质量分仍是 0.99。新增三个判据（都取「有前提才检查」，避免假警报）：
+  `pdf_without_page_numbers`（仅 PDF）、`flat_heading_levels`（标题 ≥5 且层级 ≤1）、
+  `section_path_all_empty`（标题 ≥3 且正文覆盖率 = 0）。
+  每个 flag 只扣 0.06 分 —— 目的是**可见** + 压到 medium 提示人工看一眼，
+  不是把文档一棒打死（结构坏了内容往往还在，仍值得进索引）；并写进 `reasons`。
+  实测零误报：真实 PDF `score=0.9902 flags=[]`，7 篇 URL 语料全部 ok。
+  新增 `tests/test_quality.py`（8 例）。
+- **VoyageAI rerank 客户端**（`reranker.VoyageReranker`，模型 `rerank-2.5-lite`）：
+  百炼的 rerank 免费额度已耗尽（403 `FreeTierOnly`），改走 VoyageAI。
+  ⚠️ **两家协议不同，不能只换 URL** —— Voyage 的请求体是**扁平**的
+  （`query`/`documents`/`top_k` 在顶层），结果是 `data[]`；
+  DashScope 则是 `input.query` + `parameters.top_n`，结果在 `output.results[]`。
+  新增 `build_reranker(name)` 工厂（`voyage` / `dashscope` / `none`）；
+  `run_eval.py` 加 `--reranker`（默认 voyage，可用 `RAG_RERANKER` 覆盖），
+  `rag_server.py` 同步改走工厂。
+  自带 **429 退避重试**（Retry-After 优先，其次指数退避封顶 60s）——
+  实测该账号**未绑支付方式**时限速只有 **3 RPM / 10K TPM**，
+  一次评估要打 39 次，不重试几乎全被丢弃（实测 37/39 失败）。
+  官方限速表：绑卡后（Tier 1）是 **2000 RPM / 4M TPM**（差 667 倍），
+  且「Even with a payment method entered, the free tokens will still apply」。
+  **另加主动限速** `min_interval`（`VOYAGE_RERANK_MIN_INTERVAL`）：
+  限速按分钟计，撞 429 再退避等于白打一次请求、还要等一整轮窗口，
+  已知档位时直接按间隔发更省。
+  ⚠️ **TPM 的 token 口径很反直觉**（官方 FAQ）：`query_token × 文档数 + 所有文档 token 和`
+  —— 20 个候选时约 `15 × 20 + 20 × 500 ≈ 10,300` token，**光 query 就被乘了 20 倍**。
+  未绑卡档位 10K TPM → 每分钟只能 **0.97 次** → 间隔须 ≥ **62 秒**，
+  39 条评估因此有 **~40 分钟的物理下限**。
+  ⚠️ 别把 `min_interval` 设小了"省时间"：设 41s（每分钟 1.46 次）会让**每次调用都超限**，
+  重试不断、总时长反而涨到 **1 小时以上**（实测踩过）。
+  提速只有两条路：绑卡（4M TPM），或把 `candidate_k` 降到 10（约 20 分钟）。
+  重试次数默认保持 **4**（退避是复利式的，7 次最坏等 182s×39 条）；
+  批量场景应靠 `min_interval` 提前限速，而不是撞了再等。
+  新增 `tests/test_reranker.py`（16 例，含主动限速的间隔断言）。
+- **评估器新增「拒答能力（负样本）」一节**（`eval/run_eval.py`）：
+  qrels 里有 5 条 `unanswerable`，注释写着「考系统会不会硬答」，但评估器只算检索
+  指标、而检索**永远返回 top-k** —— 这个点一直没有对应的数字。
+  新增 `abstention_analysis()`，用 **top-1 的 dense 余弦相似度**定拒答阈值
+  （有界、跨查询可比；RRF 分数是排名派生的，不可比），
+  推荐阈值取「**误拒为 0** 的前提下抓住最多负样本」。
+  实测：可回答 `min=0.528 p50=0.672`，负样本 `min=0.382 p50=0.487`，
+  **阈值 0.5285 可拒答 3/5 且误拒 0/34**；两类分布有重叠，无法 100% 分开。
 - 新增 `pipeline/ingest/qdrant_indexer.py`，支持把 Phase 0 的 `artifact.json + chunks.jsonl` 写入 Qdrant。
 - dense 使用 `full_text` 生成 embedding，sparse 使用 `sparse_text` 生成 jieba + BM25 sparse vector。
 - dense 和 sparse 使用同一个稳定 point id，并把原始 `chunk_id`、`fragments`、质量和索引决策写入 payload。
@@ -125,8 +201,31 @@
   至此架构中不再存在经 Markdown 中转的解析器，`parse_markdown_text` 只服务
   真正的 `.md` 输入。新增不变量测试 `test_no_markdown_transit_parser_registered`。
 
+### Fixed
+
+- **评估器 `--stages` 只请求下游阶段时静默给 0 分**（`eval/run_eval.py`）：
+  `union` / `rrf` / `rerank` 都拿 dense + sparse 当输入，但 dense/sparse 只在
+  **自己出现在 `--stages` 里**时才被计算。于是 `--stages rrf` 会拿两个空列表做融合，
+  **指标全 0 却不报错** —— 看起来像「模型效果差」。实测：单独跑 rrf 得 0.000，
+  跑全链路得 0.971。
+  新增 `required_stages()`：请求下游阶段时自动带上 dense + sparse；
+  只测 dense 时不会白跑 sparse（省一半检索开销）。
+  回归测试 `StageDependencyTests`（4 例）。
+
 ### Verified
 
+- **块粒度下限「不值得修」**（issue 02）：当前 113 chunks 的 token 分布
+  `min=11 p50=206 max=794`，**>800 的 0 个**（上限守住了），
+  但 **<100 的 18 个（15.9%）** —— 下限仍是单边，最小只有 11 token。
+  这些 tiny chunk 确实在挤占位置：**dense 的 top-5 里有 9.7% 是它们**。
+  但用现有评估数据模拟「过滤掉 tiny」后：
+  hit@5 **完全不变**（0.941/0.929/0.971），MRR@10 在 rrf 上只 **+0.008**、
+  dense **+0.009**、而 **sparse 反而 −0.014**。
+  → **不值得修**：收益在 n=34 的噪声内，且过滤不是无代价的。
+  **判据：占位 ≠ 有害** —— tiny chunk 占的位置本来也不会是 gold，
+  判断危害要看**相对 gold 的排名**，不是看它在结果里的占比。
+  真要修需「最小块约束」，而它不能跨章节合并（会重新引入 issue 06），
+  改动量明显大于收益。
 - 10 个单元与集成测试通过。
 - Anthropic Contextual Retrieval 文章：78 blocks、17 chunks、17 dense points、17 sparse points。
 - 旧 FastAPI 已通过 Dense、Sparse、Hybrid、Rerank 和 Answer 接口验证。

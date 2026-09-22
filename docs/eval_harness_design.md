@@ -341,6 +341,21 @@ def evaluate_one(retriever, reranker, qrels_item, config):
     } for name, ids in stages.items()}
 ```
 
+### ⚠️ `--stages` 的下游阶段必须自动带上 dense + sparse
+
+`union` / `rrf` / `rerank` 都拿 dense + sparse 当输入。上面这段代码是**无条件**
+算 dense/sparse 的（正确）。但真实实现为了省开销，只在"该阶段被请求"时才计算 ——
+一旦照搬成 `if "dense" in stages`，就会出现：
+
+```text
+--stages rrf      ->  dense=[], sparse=[]  ->  rrf_fuse([[], []]) = []
+                  ->  指标全 0.000，且【不报错】  ← 看起来像"模型效果差"
+--stages dense,sparse,union,rrf   ->  rrf hit@5 = 0.971   ← 真实值
+```
+
+所以 `run_eval.py` 里有 `required_stages()`：请求下游阶段时自动补上 dense + sparse。
+只测 dense 时仍不会白跑 sparse。回归测试见 `StageDependencyTests`。
+
 ### 4.4 报告产物
 
 ```text

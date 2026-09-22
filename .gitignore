@@ -9,6 +9,8 @@ __pycache__/
 .env
 .env.*
 *.key
+# 各家 API Key 文件（.dashscope_key / .voyage_key / …）
+pipeline/.*_key
 pipeline/.dashscope_key
 
 # 虚拟环境

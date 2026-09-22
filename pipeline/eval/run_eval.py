@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -57,6 +58,21 @@ from eval.resolve import (
 STAGES = ["dense", "sparse", "union", "rrf", "rerank"]
 
 
+def required_stages(stages: List[str]) -> set:
+    """为了跑出请求的阶段，实际【必须计算】的底层检索阶段。
+
+    `union` / `rrf` / `rerank` 都拿 dense + sparse 当输入，所以只请求下游阶段时，
+    底层阶段也必须算出来 —— 不管它们有没有出现在 `--stages` 里。
+
+    ⚠️ 不做这件事会**静默**出错：`--stages rrf` 会拿两个空列表做融合，
+    指标全 0 却不报错，看起来像「模型效果差」。实测踩过这个坑。
+    """
+    needed = set(stages)
+    if {"union", "rrf", "rerank"} & set(stages):
+        needed |= {"dense", "sparse"}
+    return needed
+
+
 def _chunk_id_of(hit: Any) -> str:
     return str((hit.payload or {}).get("chunk_id") or "")
 
@@ -76,6 +92,108 @@ def _union_order(dense: Sequence[Any], sparse: Sequence[Any]) -> List[str]:
         if cid:
             seen[cid] = seen.get(cid, 0) + rank
     return [cid for cid, _ in sorted(seen.items(), key=lambda kv: kv[1])]
+
+
+def _dist(values: Sequence[float]) -> Dict[str, float]:
+    """一组分数的分布摘要。"""
+    v = sorted(float(x) for x in values)
+    n = len(v)
+    if not n:
+        return {}
+    pick = lambda p: v[min(int(n * p), n - 1)]      # noqa: E731
+    return {
+        "n": n, "min": v[0], "p25": pick(0.25), "p50": pick(0.5),
+        "p75": pick(0.75), "max": v[-1],
+    }
+
+
+def abstention_analysis(
+    rows: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """用负样本（unanswerable）定一个「拒答阈值」。
+
+    为什么需要：qrels 里明确设计了 5 条 `unanswerable`，注释写着「考系统会不会硬答」。
+    但评估器只算检索指标，而检索**永远返回 top-k** —— 所以「会不会硬答」这个点
+    一直没有对应的数字，那 5 条等于只定义了、没被利用。
+
+    判据用 **top-1 的 dense 余弦相似度**：它有界、跨查询可比。
+    （不能用 RRF 分数 —— 它是排名派生的，不同查询之间不可比。）
+
+    若负样本分数显著低于正样本，就能在两者之间切一刀：
+    **top-1 分数低于阈值 → 拒答**。
+
+    返回 `None` 表示样本不足（没有负样本，或没跑 dense 阶段）。
+    """
+    pairs = [
+        (r.get("category"), r.get("top_dense_score"))
+        for r in rows
+        if r.get("top_dense_score") is not None
+    ]
+    pos = [s for c, s in pairs if c != "unanswerable"]
+    neg = [s for c, s in pairs if c == "unanswerable"]
+    if not pos or not neg:
+        return None
+
+    # 阈值扫描：以出现过的分数为候选切点，低于它判为拒答
+    sweep = []
+    for t in sorted(set(pos + neg)):
+        sweep.append({
+            "threshold": round(t, 4),
+            "caught_neg": sum(1 for s in neg if s < t),
+            "wrong_pos": sum(1 for s in pos if s < t),
+        })
+
+    # 推荐：**误拒为 0** 的前提下抓住尽可能多的负样本。
+    # 宁可少拒也不能误拒 —— 误拒等于把能答的问题也拒了。
+    safe = [x for x in sweep if x["wrong_pos"] == 0]
+    best = max(safe, key=lambda x: (x["caught_neg"], x["threshold"])) if safe else None
+
+    return {
+        "positive": _dist(pos),
+        "negative": _dist(neg),
+        "sweep": sweep,
+        "recommended": best,
+        # 两类完全不重叠 = 存在一个能 100% 分开的阈值
+        "separable": min(pos) > max(neg),
+    }
+
+
+def gap_analysis(
+    rows: Sequence[Dict[str, Any]], stage: str = "dense"
+) -> Optional[Dict[str, Any]]:
+    """按 top1-top2 分差中位数分两组，比较命中率。
+
+    issue 03 的待验证项：「分差小」和「排序错」的相关性有多强。
+
+    - 分差小那组命中率**明显更低** -> 「接近并列」是排序不可靠的信号，
+      值得对它做二次处理（例如只在低分差时上 rerank，省额度）
+    - 两组**差不多** -> 「分差小」本身无害，不用管它
+
+    ⚠️ 用 **hit@5** 而不是 MRR：分差小天然会让 MRR 偏低（top-1 与 top-2 谁在前
+    对 MRR 影响大），拿 MRR 分析等于循环论证。
+    """
+    pairs = []
+    for row in rows:
+        gap = row.get("dense_score_gap")
+        scores = ((row.get("stages") or {}).get(stage) or {}).get("scores") or {}
+        hit = scores.get("hit@5")
+        if gap is not None and hit is not None:
+            pairs.append((float(gap), float(hit)))
+    if len(pairs) < 6:
+        return None
+
+    pairs.sort(key=lambda x: x[0])
+    mid = len(pairs) // 2
+    low, high = pairs[:mid], pairs[mid:]
+    rate = lambda g: sum(h for _, h in g) / len(g)      # noqa: E731
+    return {
+        "n": len(pairs),
+        "low_gap": {"n": len(low), "hit@5": round(rate(low), 4),
+                    "gap_max": round(low[-1][0], 4)},
+        "high_gap": {"n": len(high), "hit@5": round(rate(high), 4),
+                     "gap_min": round(high[0][0], 4)},
+        "delta": round(rate(high) - rate(low), 4),
+    }
 
 
 def evaluate(
@@ -111,10 +229,16 @@ def evaluate(
             "stages": {},
         }
 
+        # dense / sparse 是 union / rrf / rerank 的输入 —— 见 required_stages()。
+        needed = required_stages(stages)
         t0 = time.perf_counter()
-        dense = retriever.dense_search(q, candidate_k) if "dense" in stages else []
+        dense = (
+            retriever.dense_search(q, candidate_k)
+            if "dense" in needed else []
+        )
         sparse, _, unknown = (
-            retriever.sparse_search(q, candidate_k) if "sparse" in stages else ([], [], [])
+            retriever.sparse_search(q, candidate_k)
+            if "sparse" in needed else ([], [], [])
         )
         fused = (
             HybridRetriever.rrf_fuse([dense, sparse], k=rrf_k, limit=candidate_k)
@@ -145,6 +269,27 @@ def evaluate(
             }
             by_stage[stage].append(scores)
             by_stage_cat[stage].setdefault(item.category, []).append(scores)
+
+        # 拒答能力分析用：top-1 的 dense 相似度。
+        # 负样本（unanswerable）的 top-1 分数若显著低于正样本，就能定一个拒答阈值。
+        # dense 没跑（只请求 sparse）时为 None，分析会跳过。
+        top_hit = dense[0] if dense else None
+        row["top_dense_score"] = (
+            float(top_hit.dense_score)
+            if top_hit is not None and top_hit.dense_score is not None else None
+        )
+        row["top_dense_chunk_id"] = _chunk_id_of(top_hit) if top_hit is not None else None
+
+        # issue 03 的待验证项：「分差小」和「排序错」的相关性有多强。
+        # 记录 top-1 与 top-2 的 dense 分差 —— 分差越小越接近并列。
+        # 若分差小那组的命中率明显更低，说明「接近并列」确实是排序不可靠的信号。
+        row["dense_score_gap"] = (
+            float(dense[0].dense_score) - float(dense[1].dense_score)
+            if len(dense) >= 2
+            and dense[0].dense_score is not None
+            and dense[1].dense_score is not None
+            else None
+        )
 
         row["unknown_terms"] = unknown[:10]
         row["elapsed_ms"] = elapsed_ms
@@ -303,6 +448,86 @@ def write_report(
                 ))
         lines.append("")
 
+    # ---- 分差 vs 排序可靠性（issue 03 的待验证项） ----
+    # issue 03 观察到"两个块分差 0.0001、基本并列"，怀疑分差小 == 排序不可靠。
+    # 这里按 top1-top2 分差的中位数分两组，比较命中率，把猜测变成数字。
+    gap = gap_analysis(per_query)
+    if gap:
+        low, high = gap["low_gap"], gap["high_gap"]
+        lines.append("## 分差与排序可靠性（issue 03 待验证项）\n")
+        lines.append("按 `top1 - top2` 的 dense 分差中位数分两组，比较 hit@5。"
+                     "用命中率而非 MRR —— 分差小天然让 MRR 偏低，拿 MRR 分析是循环论证。\n")
+        lines.append("| 分组 | n | 分差区间 | hit@5 |")
+        lines.append("|---|---|---|---|")
+        lines.append("| 分差小（接近并列） | %d | ≤ %.4f | **%.3f** |" % (
+            low["n"], low["gap_max"], low["hit@5"]))
+        lines.append("| 分差大 | %d | ≥ %.4f | **%.3f** |" % (
+            high["n"], high["gap_min"], high["hit@5"]))
+        lines.append("")
+        delta = gap["delta"]
+        # ⚠️ 每组只有十几条，0.1 量级的差异很可能只是噪声。宁可说"证据不足"，
+        # 也不要拿一个 n=17 的分组去论证"分差小就不可靠"。
+        missed = round(abs(delta) * (low["n"] if delta > 0 else high["n"]))
+        lines.append("**结论**：分差小那组 %s **%.3f**"
+                     "（约 %d 条之差）。" % (
+                         "低" if delta > 0 else "高", abs(delta), missed))
+        lines.append("")
+        if abs(delta) >= 0.25:
+            lines.append("差异够大，且方向与 issue 03 的猜测%s —— "
+                         "「接近并列」值得做二次处理（例如只在低分差时上重排，省额度）。"
+                         % ("一致" if delta > 0 else "相反"))
+        else:
+            lines.append("⚠️ **但每组只有 %d 条，这个量级的差异不足以定论。** "
+                         "想判断「分差小 = 排序不可靠」是否成立，需要更大的评估集 —— "
+                         "当前 39 条（可回答 34 条）撑不起这个结论。" % low["n"])
+        lines.append("")
+
+    # ---- 拒答能力（负样本） ----
+    # qrels 里那 5 条 unanswerable 的注释写着「考系统会不会硬答」，但检索永远返回
+    # top-k，所以这个点一直没有对应的数字 —— 等于只定义了、没被利用。
+    # 这里用 top-1 的 dense 相似度（有界、跨查询可比）定一个拒答阈值。
+    abst = abstention_analysis(per_query)
+    if abst:
+        pos, neg = abst["positive"], abst["negative"]
+        lines.append("## 拒答能力（负样本）\n")
+        lines.append("判据：**top-1 的 dense 余弦相似度**（有界、跨查询可比；"
+                     "RRF 分数是排名派生的，不可比）。\n")
+        lines.append("```text")
+        fmt = "%-8s n=%-3d min=%.3f  p25=%.3f  p50=%.3f  p75=%.3f  max=%.3f"
+        lines.append(fmt % ("可回答", pos["n"], pos["min"], pos["p25"],
+                            pos["p50"], pos["p75"], pos["max"]))
+        lines.append(fmt % ("负样本", neg["n"], neg["min"], neg["p25"],
+                            neg["p50"], neg["p75"], neg["max"]))
+        lines.append("```\n")
+
+        lines.append("| query_id | top-1 相似度 | top-1 chunk |")
+        lines.append("|---|---|---|")
+        for row in per_query:
+            if row.get("category") != "unanswerable":
+                continue
+            sc = row.get("top_dense_score")
+            lines.append("| %s | %s | %s |" % (
+                row.get("query_id"),
+                "%.3f" % sc if sc is not None else "—",
+                row.get("top_dense_chunk_id") or "—",
+            ))
+        lines.append("")
+
+        rec = abst.get("recommended")
+        if rec:
+            lines.append("**推荐阈值 `%.4f`** —— top-1 相似度低于它则拒答："
+                         "正确拒答 **%d/%d** 条负样本，误拒 **%d/%d** 条可回答。"
+                         % (rec["threshold"], rec["caught_neg"], neg["n"],
+                            rec["wrong_pos"], pos["n"]))
+        else:
+            lines.append("⚠️ **没有可用阈值**：任何切点都会误拒可回答的 query。")
+        if abst.get("separable"):
+            lines.append("两类分布**完全不重叠**，存在 100%% 分开的阈值。")
+        else:
+            lines.append("⚠️ 两类分布**有重叠** —— 负样本的 top-1 分数并不总低于正样本，"
+                         "单靠相似度阈值无法完全分开。")
+        lines.append("")
+
     if resolve_notes:
         lines.append("## 解析提示\n")
         lines.append("```text")
@@ -363,6 +588,7 @@ def _build_retriever(
     items: Sequence[Any],
     gold_map: Dict[str, Set[str]],
     stages: Sequence[str],
+    reranker_name: str = "voyage",
 ):
     """构造检索器。dry-run 时返回桩, 否则连真实 Qdrant。"""
     if getattr(args, "dry_run", False):
@@ -383,8 +609,8 @@ def _build_retriever(
     )
     reranker = None
     if "rerank" in stages:
-        from reranker import DashScopeReranker
-        reranker = DashScopeReranker.from_env()
+        from reranker import build_reranker
+        reranker = build_reranker(reranker_name)
     return retriever, reranker, client
 
 
@@ -404,6 +630,8 @@ def main() -> None:
     ap.add_argument("--rrf-k", type=int, default=60)
     ap.add_argument("--stages", default=",".join(STAGES),
                     help="逗号分隔, 默认全部五阶段")
+    ap.add_argument("--reranker", default=os.getenv("RAG_RERANKER", "voyage"),
+                    help="voyage (rerank-2.5-lite, 默认) / dashscope / none")
     ap.add_argument("--no-rerank", action="store_true")
     ap.add_argument("--dry-run", action="store_true",
                     help="用桩检索器验证 harness 本身（不调 API, 指标应完美）")
@@ -451,7 +679,8 @@ def main() -> None:
     from embeddings import build_embeddings
     from hybrid_retriever import HybridRetriever
 
-    retriever, reranker, client = _build_retriever(args, items, gold_map, stages)
+    retriever, reranker, client = _build_retriever(
+        args, items, gold_map, stages, reranker_name=args.reranker)
     if args.dry_run:
         print("模式       : DRY-RUN（桩检索器, 指标应完美）")
     elif reranker is not None:
