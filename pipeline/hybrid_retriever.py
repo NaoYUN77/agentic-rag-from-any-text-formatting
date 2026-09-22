@@ -35,6 +35,19 @@ class RetrievalHit:
     matched_terms: Optional[List[str]] = None
 
 
+def _top_dense(hits: Sequence[RetrievalHit]) -> Optional[float]:
+    """dense 排序里 top-1 的相似度。
+
+    ⚠️ 是 **dense 自己的 top-1**，不是「最终排序 top-1 的 dense_score」——
+    后者在 rrf / rerank 之后已经换人了。拒答阈值就是在这个量上标定的，
+    两边必须用同一个定义，否则阈值对不上。
+    """
+    if not hits:
+        return None
+    score = hits[0].dense_score
+    return float(score) if score is not None else None
+
+
 class HybridRetriever:
     def __init__(
         self,
@@ -232,6 +245,7 @@ class HybridRetriever:
                 "hits": dense_hits[:limit],
                 "known_terms": [],
                 "unknown_terms": [],
+                "dense_top_score": _top_dense(dense_hits),
             }
 
         if mode == "sparse":
@@ -240,6 +254,7 @@ class HybridRetriever:
                 "hits": sparse_hits[:limit],
                 "known_terms": known,
                 "unknown_terms": unknown,
+                "dense_top_score": None,
             }
 
         fused = self.rrf_fuse(
@@ -252,4 +267,5 @@ class HybridRetriever:
             "hits": fused,
             "known_terms": known,
             "unknown_terms": unknown,
+            "dense_top_score": _top_dense(dense_hits),
         }

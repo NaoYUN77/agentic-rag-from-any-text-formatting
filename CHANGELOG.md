@@ -4,6 +4,27 @@
 
 ### Added
 
+- **FastAPI 服务新增拒答能力**（`rag_server.py`，`RAG_ABSTAIN_THRESHOLD`）：
+  此前拒答阈值只存在于评估报告里（`eval/run_eval.py` 的「拒答能力」一节），
+  **生产链路没有任何拒答逻辑** —— 不管问什么都会硬答。
+  现在 `POST /api/search` 与 `POST /api/answer` 都会：
+  - 用 **query 的 dense 排序 top-1 余弦相似度** 与阈值比较（与标定用的是同一个量）
+  - 低于阈值时 `abstained=true`；`/api/answer` 还会**跳过生成模型**
+    （`generation_ms=0`、`model="(abstained)"`），返回固定话术而不是硬编答案
+  - 响应新增 `abstained` / `abstain_threshold` / `dense_top_score`；
+    `/api/info` 也报告当前阈值
+  **默认 `0` = 关闭**，不设环境变量就完全保持原有行为。
+  三个设计要点：
+  ① 判据用 **dense 自己的 top-1**，不是「最终排序 top-1 的 dense_score」——
+     后者在 rrf/rerank 之后已经换人了，两边定义不一致阈值就对不上；
+  ② 边界用 `<` 而非 `<=`，边界上宁可作答；
+  ③ **判据缺失时（如 `mode=sparse` 没跑 dense）宁可作答** ——
+     「没依据就拒答」比答错更糟，用户会以为语料里真没有。
+  `HybridRetriever.search()` 新增返回 `dense_top_score`。
+  实测（当前语料，阈值 0.5285）：`cr_01` 0.811 作答、`un_01` 0.382 拒答、
+  `un_02` 0.450 拒答、`un_03` 0.593 作答（正是标定时「只抓住 3/5」的那条）。
+  新增 `tests/test_abstain.py`（8 例）。
+  ⚠️ 阈值是「语料 + 嵌入模型」绑定的，换任一个都必须**重新标定**。
 - **块粒度扫描修好后第一次跑出有效数字**（`sweep_chunk_params.py`）：
   旧版 `sweep_chunk_params.json`（2026-09-20）里 600/800/1200 三个变体的
   五个阶段**全是 0.0** —— 根因是 `_parse_metrics` 全文扫行取表格，

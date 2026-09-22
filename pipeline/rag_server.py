@@ -45,6 +45,25 @@ SPARSE_ARTIFACT_DIR = Path(os.getenv(
 ))
 STATIC_DIR = Path(__file__).parent / "static"
 
+# ---- 拒答阈值 ----
+# 判据：**query 的 dense top-1 余弦相似度**低于阈值 -> 判为「语料里没有答案」。
+# 0 = 关闭（默认），保持原有行为不变。
+#
+# ⚠️ 这个阈值是「语料 + 嵌入模型」绑定的，换任一个都必须**重新标定** ——
+# 它不是通用常数。标定方法见 `eval/run_eval.py` 的「拒答能力」一节：
+# 用 qrels 里的 unanswerable 负样本，取「误拒为 0 的前提下抓住最多负样本」的切点。
+#
+# 当前语料（phase0_capped，39 条 qrels）标定结果：
+#   可回答 n=34  min=0.528  p50=0.672 ；负样本 n=5  min=0.382  p50=0.487
+#   推荐 0.5285 -> 拒答 3/5，误拒 0/34
+# ⚠️ 两类分布有重叠（负样本 max 0.598 > 可回答 min 0.528），只能拒掉一部分。
+ABSTAIN_THRESHOLD = float(os.getenv("RAG_ABSTAIN_THRESHOLD", "0"))
+
+ABSTAIN_ANSWER = (
+    "语料里没有找到足以回答这个问题的内容。"
+    "（当前检索到的最高相关度低于拒答阈值，为避免编造答案，这里不作答。）"
+)
+
 _state: Dict[str, Any] = {}
 
 
@@ -167,6 +186,16 @@ class SearchResponse(BaseModel):
     rerank_error: Optional[str] = None
     sparse_known_terms: List[str] = Field(default_factory=list)
     sparse_unknown_terms: List[str] = Field(default_factory=list)
+    # ---- 拒答 ----
+    # dense_top_score 是 **dense 排序的 top-1 相似度**（不是最终排序 top-1 的分数）
+    # —— 拒答阈值就是在这个量上标定的。
+    abstained: bool = Field(
+        False, description="是否因相关度过低而拒答（阈值 0 时恒为 false）"
+    )
+    abstain_threshold: float = Field(0.0, description="当前生效的拒答阈值，0=关闭")
+    dense_top_score: Optional[float] = Field(
+        None, description="dense 排序 top-1 的余弦相似度；mode=sparse 时为 null"
+    )
 
 
 class AnswerRequest(SearchRequest):
@@ -204,6 +233,14 @@ class AnswerResponse(BaseModel):
     filtered: bool
     rerank_applied: bool = False
     rerank_ms: int = 0
+    # ---- 拒答 ----
+    abstained: bool = Field(
+        False, description="是否拒答；为 true 时 answer 是固定话术，未调用生成模型"
+    )
+    abstain_threshold: float = Field(0.0, description="当前生效的拒答阈值，0=关闭")
+    dense_top_score: Optional[float] = Field(
+        None, description="dense 排序 top-1 的余弦相似度"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -284,6 +321,18 @@ def _retrieve_with_rerank(req: SearchRequest, limit: int) -> tuple:
     return result, hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error
 
 
+def _should_abstain(dense_top_score: Optional[float]) -> bool:
+    """相关度过低则拒答。
+
+    阈值 0（默认）时**恒为 False** —— 不设阈值就完全保持原有行为。
+    `dense_top_score is None` 也返回 False（例如 mode=sparse 没跑 dense）——
+    **判据缺失时宁可作答，也不要在没依据的情况下拒答**。
+    """
+    if ABSTAIN_THRESHOLD <= 0 or dense_top_score is None:
+        return False
+    return dense_top_score < ABSTAIN_THRESHOLD
+
+
 @app.post("/api/search", response_model=SearchResponse)
 def search(req: SearchRequest) -> SearchResponse:
     result, result_hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error = (
@@ -300,6 +349,7 @@ def search(req: SearchRequest) -> SearchResponse:
     if len(hits) >= 2:
         margin = round(hits[0].score - hits[1].score, 4)
 
+    dense_top = result.get("dense_top_score")
     return SearchResponse(
         query=req.query,
         mode=req.mode,
@@ -316,6 +366,9 @@ def search(req: SearchRequest) -> SearchResponse:
         rerank_error=rerank_error,
         sparse_known_terms=result.get("known_terms", []),
         sparse_unknown_terms=result.get("unknown_terms", []),
+        abstained=_should_abstain(dense_top),
+        abstain_threshold=ABSTAIN_THRESHOLD,
+        dense_top_score=dense_top,
     )
 
 
@@ -327,6 +380,38 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     result, retrieval_hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error = (
         _retrieve_with_rerank(req, limit=req.context_k)
     )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    hits = [
+        _to_hit(hit, rank=i, mode=req.mode)
+        for i, hit in enumerate(retrieval_hits, 1)
+    ]
+
+    dense_top = result.get("dense_top_score")
+    abstained = _should_abstain(dense_top)
+
+    # 拒答时**不调用生成模型** —— 这正是拒答的意义：省一次 LLM 调用，
+    # 也避免它对着不相关的上下文硬编一个答案出来。
+    if abstained:
+        return AnswerResponse(
+            query=req.query,
+            answer=ABSTAIN_ANSWER,
+            mode=req.mode,
+            model="(abstained)",
+            citations=[],
+            hits=hits,
+            retrieval_ms=retrieval_ms,
+            generation_ms=0,
+            elapsed_ms=elapsed_ms,
+            context_chars=0,
+            filtered=bool(req.section),
+            rerank_applied=rerank_applied,
+            rerank_ms=rerank_ms,
+            abstained=True,
+            abstain_threshold=ABSTAIN_THRESHOLD,
+            dense_top_score=dense_top,
+        )
+
     generation = generator.generate(
         query=req.query,
         hits=retrieval_hits,
@@ -336,10 +421,6 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     )
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
-    hits = [
-        _to_hit(hit, rank=i, mode=req.mode)
-        for i, hit in enumerate(retrieval_hits, 1)
-    ]
     citations = [
         CitationOut(
             index=c.index,
@@ -369,6 +450,9 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         filtered=bool(req.section),
         rerank_applied=rerank_applied,
         rerank_ms=rerank_ms,
+        abstained=False,
+        abstain_threshold=ABSTAIN_THRESHOLD,
+        dense_top_score=dense_top,
     )
 
 
@@ -390,6 +474,9 @@ def info() -> Dict[str, Any]:
         "rerank_model": _state.get("reranker").model if _state.get("reranker") else None,
         "mode": "hybrid + RRF",
         "rrf_k": 60,
+        # 拒答阈值：0 = 关闭。见文件顶部的说明与标定方法。
+        "abstain_threshold": ABSTAIN_THRESHOLD,
+        "abstain_enabled": ABSTAIN_THRESHOLD > 0,
     }
 
 
