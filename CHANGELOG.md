@@ -4,6 +4,71 @@
 
 ### Added
 
+- **调试界面补三处可读性**（`static/index.html`，用 playwright 实际截图核对后发现）：
+  - 命中卡片**新增来源文档 chip**（`file_name`）—— 原先卡片上根本看不出这段来自哪篇，
+    对调试是硬伤
+  - 章节为空时**显式显示「无章节」**，不再留一个空 chip（空 chip 看起来像 bug；
+    而"这块没有章节"本身是有用的信息，正是 issue 05 那个丢结构问题在界面上的显形）
+  - 章节优先显示**完整 `section_path`**（`A › B › C`），比单个 `section` 有信息量
+  - 页码为空时**不显示**，不再每张卡片挂一个无意义的 `p?`（本语料全是 HTML/MD，永远没有页）
+  - 新增 `GET /favicon.ico`（204）—— 否则调试时 console 里一直挂一条 404 红字
+- **调试界面展示拒答**（`static/index.html`）：后端加了拒答能力，但界面上看不出来 ——
+  「拒答」和「正常回答」长得一样，会让人以为系统真的答了。现在：
+  - 顶栏显示当前**拒答阈值**（或「关闭」）
+  - 统计行加一个**闸门标签**：`top1 0.382 < 阈值 0.5285 → 拒答`（绿=作答 / 黄=拒答）；
+    **关闭时也显示分数**，这样能判断「要是开了会不会被拒」
+  - 拒答时用**独立的琥珀色横幅**（`已拒答 · 未调用生成模型`），
+    而不是复用正常答案的样式 —— 它不是一个「回答」，而是一次有意的拒绝
+  - `mode=sparse` 时没有 top-1 分数，标签显示「无 top1（sparse 未跑 dense）」，
+    而不是误显示成 0
+- **质量门新增判据「长文却无标题」**（`long_document_without_headings`）：
+  判据 2/3 都要求「有标题才检查」（`len(headings) >= 5` / `>= 3`），
+  于是 **0 标题的文档反而静默通过**。但一篇长文没有标题是可疑的 ——
+  要么源本身无结构，要么结构在抽取时丢了；两种都该可见。
+  阈值取 **2000 字符**：实测全部**有**标题的文档都 ≥ 8907 字符，
+  而**无**标题的是 7846 / 12804 —— 留足余量，不误伤短文。
+  **零误报、精确命中**：7 篇 anthropic `ok`，2 篇 openai
+  （`openai_agents_api` / `openai_model_misalignment`，7846 / 12804 字符、0 标题）
+  被标出，score 0.95 → 0.89。
+  新增 `LongDocumentWithoutHeadingsTests`（4 例）。
+  **没有**让结构 flag 去压低 `status` —— 那会改变 `decide_index` 的
+  `sparse_weight`（1.0 → 0.6）进而影响检索指标，需要重跑评估才能动；
+  本轮目标是让问题**可见**，这一层已做到。
+  触发它的真实原因：3 篇 openai 文档抓不到源 HTML，回退用旧的 `document.md`
+  （`markdown` 解析器），其中 2 篇 0 标题 → 没有 `section_path`，
+  按章节过滤和引用都无从谈起（详见 issue 05）。
+- **拒答阈值标定脚本**（`calibrate_abstain.py`）：阈值是「语料 + 嵌入模型」绑定的，
+  换任一个都必须重算。写死在代码里就会变成一个没人敢动的魔法数字 ——
+  而且换了语料之后**它是错的**却没人发现（症状是「明明语料里有答案却被拒答」，
+  很难归因到这里）。脚本把它做成一条命令：读 qrels 的负样本、跑一遍 dense 检索、
+  按「**误拒为 0 的前提下抓住最多负样本**」给出推荐阈值。
+  **与评估器共用同一个函数**（`eval.run_eval.abstention_analysis`），
+  所以两边不会出现定义漂移（实测两边都给出 `0.5285`）。
+  `--write` 写入 `pipeline/.abstain_threshold`（gitignored），
+  服务在未设 `RAG_ABSTAIN_THRESHOLD` 时会读它 —— 标定到生效一步到位。
+  环境变量始终优先于文件；环境变量填错或文件损坏都退化为「关闭」而不是崩溃。
+  新增 `LoadThresholdTests`（5 例）。
+- **FastAPI 服务新增拒答能力**（`rag_server.py`，`RAG_ABSTAIN_THRESHOLD`）：
+  此前拒答阈值只存在于评估报告里（`eval/run_eval.py` 的「拒答能力」一节），
+  **生产链路没有任何拒答逻辑** —— 不管问什么都会硬答。
+  现在 `POST /api/search` 与 `POST /api/answer` 都会：
+  - 用 **query 的 dense 排序 top-1 余弦相似度** 与阈值比较（与标定用的是同一个量）
+  - 低于阈值时 `abstained=true`；`/api/answer` 还会**跳过生成模型**
+    （`generation_ms=0`、`model="(abstained)"`），返回固定话术而不是硬编答案
+  - 响应新增 `abstained` / `abstain_threshold` / `dense_top_score`；
+    `/api/info` 也报告当前阈值
+  **默认 `0` = 关闭**，不设环境变量就完全保持原有行为。
+  三个设计要点：
+  ① 判据用 **dense 自己的 top-1**，不是「最终排序 top-1 的 dense_score」——
+     后者在 rrf/rerank 之后已经换人了，两边定义不一致阈值就对不上；
+  ② 边界用 `<` 而非 `<=`，边界上宁可作答；
+  ③ **判据缺失时（如 `mode=sparse` 没跑 dense）宁可作答** ——
+     「没依据就拒答」比答错更糟，用户会以为语料里真没有。
+  `HybridRetriever.search()` 新增返回 `dense_top_score`。
+  实测（当前语料，阈值 0.5285）：`cr_01` 0.811 作答、`un_01` 0.382 拒答、
+  `un_02` 0.450 拒答、`un_03` 0.593 作答（正是标定时「只抓住 3/5」的那条）。
+  新增 `tests/test_abstain.py`（8 例）。
+  ⚠️ 阈值是「语料 + 嵌入模型」绑定的，换任一个都必须**重新标定**。
 - **块粒度扫描修好后第一次跑出有效数字**（`sweep_chunk_params.py`）：
   旧版 `sweep_chunk_params.json`（2026-09-20）里 600/800/1200 三个变体的
   五个阶段**全是 0.0** —— 根因是 `_parse_metrics` 全文扫行取表格，
@@ -203,6 +268,51 @@
 
 ### Fixed
 
+- **`top_k` 契约被静默破坏（两个"少给内容"的路径）**：调用方要 N 条却拿到更少，
+  **不报错**，只是结果变少 —— 这类问题在指标上看不出来，极难发现。
+  1. **候选池小于 `top_k`**：`candidate_limit = rerank_candidate_k`（默认 20），
+     而 `top_k` 上限 50 → `top_k=30` 只能拿到 20。
+     修法：`max(limit, rerank_candidate_k)`。
+  2. **每路深度不够**：`candidate_k` 是**每路**深度，hybrid 是两路并集
+     → `candidate_k=20`、要 45 条只拿到 34 条。
+     ⚠️ **不能按 `ceil(limit/2)` 算** —— 那样只在两路完全不重叠时成立；
+     实测取 23 时仍只拿到 34 条（两路命中大量重叠，并集远小于 2×k）。
+     修法：新增 `hybrid_retriever.resolve_depths()`，取 `max(candidate_k, limit)`。
+     代价很小：dense 的 query 向量与 k 无关（只算一次），sparse 是纯本地计算。
+  **实测**：`top_k` ∈ {5,20,30,45,50} × mode ∈ {hybrid,dense,sparse} 共 **15/15 全部满足**
+  （修复前 hybrid 45→34、50→37；dense 30→20）。
+  新增 `tests/test_retrieval_depths.py`（6 例，含「不能按 limit/2 算」的关键回归）。
+- **rerank 失败时返回条数不受 `top_k` 约束**（`rag_server._retrieve_with_rerank`）：
+  rerank 抛异常时 `hits` 还是**候选列表**（`rerank_candidate_k` 条，默认 20），
+  没有截回 `limit` —— 调用方要 3 条却拿到 20 条。
+  实测：`top_k=3` 时 `rerank=False` 返回 3 条、`rerank=True`（429 失败）返回 **20 条**。
+  ⚠️ 这个坑恰好在 **API 降级（限速 / 超时）时触发**，最不该出意外的时候。
+  修法：失败分支加 `hits = hits[:limit]`。修复后 3→3、5→5。
+- **抓取守卫漏掉「拦截/挑战页」**（`fetch_phase0_sources.py`）：原先只用
+  `len(html) < 5000` 判断抓取是否成功，而实测 openai.com 返回的 **Cloudflare 挑战页
+  有 11,414 字节**，轻松过关 → 挑战页会被当成正文写进 `experiments/_sources/`，
+  后续解析出一篇**没有标题、没有正文**的"文档"却毫无告警。
+  （这正是 3 篇 openai 文档结构丢失的**同类**问题。）
+  新增 `_looks_like_challenge()`：在开头 30KB 里找 `just a moment` / `请稍候` /
+  `enable javascript` / `cf-challenge` / `access denied` 等特征，写盘前拦截，
+  并给出可操作的失败信息（含 title 与字节数）。**只在开头找**，避免正文里
+  偶尔提到 `captcha` 的正当文章被误杀。
+  实测：`FAIL 拿到的是拦截/挑战页而不是正文（title='请稍候…', 11414 bytes）
+  —— 换抓取方式或换语料源`，且不写盘。
+  新增 `tests/test_fetch_guard.py`（6 例，含「挑战页 padding 到 20KB 仍须被识别」）。
+- **测试因缺 `fastapi` 而在 CI 整体失败**：`tests/test_abstain.py` import 了
+  `rag_server`，而 `rag_server` 顶部 `from fastapi import ...` ——
+  CI 只装 Phase 0 的 8 个包（llama-index-core / trafilatura / bs4 / markdownify /
+  lxml / readability-lxml / qdrant-client / jieba），**没有 fastapi**，
+  于是整个测试套件 error（本地却全过，因为本地 venv 装了全部依赖）。
+  **修法不是往 CI 塞 fastapi** —— 拒答判定本身是纯函数，不该绑在 Web 框架上。
+  抽成 `pipeline/abstention.py`（`should_abstain` / `load_threshold` /
+  `ABSTAIN_ANSWER`），`rag_server` 改为 import 它们。
+  顺带改进：`should_abstain` 现在**显式收阈值参数**，测试不用再
+  `patch("rag_server.ABSTAIN_THRESHOLD")` —— 那种写法本身就说明逻辑与配置耦合了。
+  新增 `NoHeavyImportTests` 断言该测试文件不把 `rag_server` / `fastapi`
+  拖进 `sys.modules`。验证：模拟 CI 屏蔽 fastapi / pydantic / uvicorn 后
+  跑 6 个测试文件，`ran=88 errors=0 failures=0`。
 - **评估器 `--stages` 只请求下游阶段时静默给 0 分**（`eval/run_eval.py`）：
   `union` / `rrf` / `rerank` 都拿 dense + sparse 当输入，但 dense/sparse 只在
   **自己出现在 `--stages` 里**时才被计算。于是 `--stages rrf` 会拿两个空列表做融合，

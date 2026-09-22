@@ -23,14 +23,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
 from embeddings import build_embeddings
-from hybrid_retriever import HybridRetriever
+from hybrid_retriever import HybridRetriever, resolve_depths
 from generation import QwenChatGenerator
-from reranker import build_reranker
+from reranker import DashScopeReranker, VoyageReranker, build_reranker
+from abstention import ABSTAIN_ANSWER, load_threshold, should_abstain
 
 QDRANT_PATH = os.getenv("RAG_QDRANT_PATH", "qdrant_data")
 # 默认指向 Phase 0 的当前索引（固定大小切块、无 overlap、
@@ -44,6 +45,13 @@ SPARSE_ARTIFACT_DIR = Path(os.getenv(
     str(Path(__file__).parent / "index_artifacts" / "phase0_capped"),
 ))
 STATIC_DIR = Path(__file__).parent / "static"
+
+# ---- 拒答 ----
+# 判定逻辑抽在 abstention.py（纯函数，不依赖 fastapi）——
+# 放在这里会让任何想用它的地方（脚本 / 评估 / 测试）都被迫拖上
+# 一整套 Web 依赖。CI 里撞过：测试只 import 了一下这个模块就整体失败。
+# 阈值是「语料 + 嵌入模型」绑定的，换任一个都要用 calibrate_abstain.py 重算。
+ABSTAIN_THRESHOLD = load_threshold()
 
 _state: Dict[str, Any] = {}
 
@@ -167,6 +175,16 @@ class SearchResponse(BaseModel):
     rerank_error: Optional[str] = None
     sparse_known_terms: List[str] = Field(default_factory=list)
     sparse_unknown_terms: List[str] = Field(default_factory=list)
+    # ---- 拒答 ----
+    # dense_top_score 是 **dense 排序的 top-1 相似度**（不是最终排序 top-1 的分数）
+    # —— 拒答阈值就是在这个量上标定的。
+    abstained: bool = Field(
+        False, description="是否因相关度过低而拒答（阈值 0 时恒为 false）"
+    )
+    abstain_threshold: float = Field(0.0, description="当前生效的拒答阈值，0=关闭")
+    dense_top_score: Optional[float] = Field(
+        None, description="dense 排序 top-1 的余弦相似度；mode=sparse 时为 null"
+    )
 
 
 class AnswerRequest(SearchRequest):
@@ -204,6 +222,14 @@ class AnswerResponse(BaseModel):
     filtered: bool
     rerank_applied: bool = False
     rerank_ms: int = 0
+    # ---- 拒答 ----
+    abstained: bool = Field(
+        False, description="是否拒答；为 true 时 answer 是固定话术，未调用生成模型"
+    )
+    abstain_threshold: float = Field(0.0, description="当前生效的拒答阈值，0=关闭")
+    dense_top_score: Optional[float] = Field(
+        None, description="dense 排序 top-1 的余弦相似度"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -254,15 +280,23 @@ def _to_hit(p, rank: int, mode: str) -> Hit:
 
 def _retrieve_with_rerank(req: SearchRequest, limit: int) -> tuple:
     retriever: HybridRetriever = _state["retriever"]
-    reranker: DashScopeReranker = _state["reranker"]
-    candidate_limit = req.rerank_candidate_k if req.rerank else limit
+    # 具体实现由 RAG_RERANKER 决定（voyage / dashscope / none）。
+    # 注意: 原注解写的是 DashScopeReranker, 但那个名字从未导入过 —— 见 F821。
+    reranker: VoyageReranker | DashScopeReranker | None = _state["reranker"]
+    # 候选池必须**至少**有 limit 条 —— 否则 rerank 最多只能吐出候选池那么多，
+    # 调用方要 top_k=30 却只拿到 20（rerank_candidate_k 默认 20，而 top_k 上限 50）。
+    # 这是个静默的"数量不足"：不会报错，只是少给内容，调用方很难发现。
+    candidate_limit = max(limit, req.rerank_candidate_k) if req.rerank else limit
+    # 每路深度同理：candidate_k 是**每路**的，要能供上 limit 条。
+    # 不补的话 hybrid 最多给 2×candidate_k 条（实测 candidate_k=20、要 45 条只给 31 条）。
+    candidate_k = resolve_depths(limit, req.mode, req.candidate_k)
 
     t0 = time.perf_counter()
     result = retriever.search(
         query=req.query,
         mode=req.mode,
         limit=candidate_limit,
-        candidate_k=req.candidate_k,
+        candidate_k=candidate_k,
         rrf_k=req.rrf_k,
         section=req.section,
     )
@@ -279,6 +313,10 @@ def _retrieve_with_rerank(req: SearchRequest, limit: int) -> tuple:
             rerank_applied = True
         except Exception as exc:
             rerank_error = str(exc)
+            # ⚠️ 失败时 hits 还是**候选列表**（`rerank_candidate_k` 条，默认 20），
+            # 必须截回 limit —— 否则调用方要 3 条却拿到 20 条。
+            # 这个坑恰好在 API 降级（限速 / 超时）时触发，最不该出意外的时候。
+            hits = hits[:limit]
         rerank_ms = int((time.perf_counter() - t1) * 1000)
 
     return result, hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error
@@ -300,6 +338,7 @@ def search(req: SearchRequest) -> SearchResponse:
     if len(hits) >= 2:
         margin = round(hits[0].score - hits[1].score, 4)
 
+    dense_top = result.get("dense_top_score")
     return SearchResponse(
         query=req.query,
         mode=req.mode,
@@ -316,6 +355,9 @@ def search(req: SearchRequest) -> SearchResponse:
         rerank_error=rerank_error,
         sparse_known_terms=result.get("known_terms", []),
         sparse_unknown_terms=result.get("unknown_terms", []),
+        abstained=should_abstain(dense_top, ABSTAIN_THRESHOLD),
+        abstain_threshold=ABSTAIN_THRESHOLD,
+        dense_top_score=dense_top,
     )
 
 
@@ -327,6 +369,38 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     result, retrieval_hits, retrieval_ms, rerank_applied, rerank_ms, rerank_error = (
         _retrieve_with_rerank(req, limit=req.context_k)
     )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    hits = [
+        _to_hit(hit, rank=i, mode=req.mode)
+        for i, hit in enumerate(retrieval_hits, 1)
+    ]
+
+    dense_top = result.get("dense_top_score")
+    abstained = should_abstain(dense_top, ABSTAIN_THRESHOLD)
+
+    # 拒答时**不调用生成模型** —— 这正是拒答的意义：省一次 LLM 调用，
+    # 也避免它对着不相关的上下文硬编一个答案出来。
+    if abstained:
+        return AnswerResponse(
+            query=req.query,
+            answer=ABSTAIN_ANSWER,
+            mode=req.mode,
+            model="(abstained)",
+            citations=[],
+            hits=hits,
+            retrieval_ms=retrieval_ms,
+            generation_ms=0,
+            elapsed_ms=elapsed_ms,
+            context_chars=0,
+            filtered=bool(req.section),
+            rerank_applied=rerank_applied,
+            rerank_ms=rerank_ms,
+            abstained=True,
+            abstain_threshold=ABSTAIN_THRESHOLD,
+            dense_top_score=dense_top,
+        )
+
     generation = generator.generate(
         query=req.query,
         hits=retrieval_hits,
@@ -336,10 +410,6 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     )
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
-    hits = [
-        _to_hit(hit, rank=i, mode=req.mode)
-        for i, hit in enumerate(retrieval_hits, 1)
-    ]
     citations = [
         CitationOut(
             index=c.index,
@@ -369,6 +439,9 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         filtered=bool(req.section),
         rerank_applied=rerank_applied,
         rerank_ms=rerank_ms,
+        abstained=False,
+        abstain_threshold=ABSTAIN_THRESHOLD,
+        dense_top_score=dense_top,
     )
 
 
@@ -390,6 +463,9 @@ def info() -> Dict[str, Any]:
         "rerank_model": _state.get("reranker").model if _state.get("reranker") else None,
         "mode": "hybrid + RRF",
         "rrf_k": 60,
+        # 拒答阈值：0 = 关闭。见文件顶部的说明与标定方法。
+        "abstain_threshold": ABSTAIN_THRESHOLD,
+        "abstain_enabled": ABSTAIN_THRESHOLD > 0,
     }
 
 
@@ -419,4 +495,11 @@ def index() -> FileResponse:
     if not f.exists():
         raise HTTPException(500, "static/index.html 不存在")
     return FileResponse(f)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    """空 favicon —— 否则浏览器每次访问都会 404，
+    调试界面时 console 里会一直挂一条红色的 Failed to load resource。"""
+    return Response(status_code=204)
 

@@ -1,6 +1,98 @@
 # 问题 05: metadata 质量差, 过滤和引用都不可靠
 
-**优先级: P1**　**状态: 待解决**
+**优先级: P1**　**状态: 部分已修复；残留 1 个已定位的问题（3 篇文档无结构）**
+
+> ⚠️ 本文「现象」「根因」写于旧 LlamaIndex 管线（`section` 从脏标题句里截 40 字）。
+> 那个根因在当前管线里**已不存在** —— 现在用 `section_path` 数组 + `headings`。
+> 当前状态见下一节。
+
+## 2026-09-22: 用当前索引重测
+
+### 引用所需字段的覆盖率（Qdrant payload，113 chunks）
+
+| 字段 | 覆盖率 |
+|---|---|
+| `file_name` / `url` / `source_uri` / `mime_type` | **100%** |
+| `title` | 94% |
+| `section` / `section_path` | **88%** |
+| `headings` | 84% |
+| `page` | **不适用** —— 语料 10 篇全是 HTML/Markdown，本来就没有页 |
+
+`section_path` 深度分布：深度 1 = 48 个、深度 2 = 40 个、深度 3 = 10 个、
+深度 4 = 2 个，另有 **13 个深度 0**。
+
+> ⚠️ 注意 `chunks.jsonl`（瘦身 dump）**不含** `page`/`file_name`/`url`/`headings`，
+> 查这些字段要看 Qdrant payload 或 `artifact.json`，否则会误判成"全缺"（踩过）。
+
+### 那 13 个没有 `section_path` 的块，分两类
+
+```text
+6 篇 anthropic 的首段（c0）  —— 标题之前的引言段，内容正常，只是没有所属章节
+2 篇 openai 的全部块（7 个）  —— 整篇 0 标题
+```
+
+前者正常；**后者是真问题**。
+
+### 真问题：3 篇 openai 文档丢了全部结构
+
+| 文档 | parser | 字符数 | **标题数** |
+|---|---|---:|---:|
+| 7 篇 anthropic | `html_readability` | 8907~39362 | 7~19 |
+| `openai_agents_api` | **`markdown`** | 7846 | **0** |
+| `openai_model_misalignment` | **`markdown`** | 12804 | **0** |
+| `openai_scaling_storage` | `markdown` | 19667 | 9 |
+
+**根因**（`rebuild_phase0_corpus.py` 的注释里已写明）：3 篇 openai 文档
+**抓不到源 HTML**，退而用旧产物的 `document.md` → 走 `markdown` 解析器 →
+其中 2 篇的 markdown 里**一个 `#` 都没有**。
+
+**影响**：这 2 篇（占语料 16% 的 chunk）**没有 `section_path`** ——
+按章节过滤、按章节引用都无从谈起；`title` 也是 `None`。
+
+### 质量门此前**抓不到这个**（已修）
+
+判据 2/3 都要求「**有标题才检查**」（`len(headings) >= 5` / `>= 3`），
+于是 **0 标题的文档反而静默通过**。已新增判据 4：
+
+```text
+long_document_without_headings   字符数 >= 2000 且 0 标题
+```
+
+阈值依据：全部**有**标题的文档都 ≥ 8907 字符，而**无**标题的是 7846 / 12804
+—— 取 2000 留足余量，不会误伤短文（一段话的便签本来就该没标题）。
+
+**实测零误报、精确命中**：
+
+```text
+7 篇 anthropic        score 0.9957~1.0000   ok
+openai_agents_api     score 0.8900  ⚠️ long_document_without_headings
+openai_model_misalig  score 0.8900  ⚠️ long_document_without_headings
+openai_scaling_storage score 0.9959  ok（有 9 个标题）
+```
+
+> 说明：**没有**让结构 flag 去压低 `status`。那会改变 `decide_index` 的
+> `sparse_weight`（1.0 → 0.6），进而影响检索指标，需要重跑评估才能动。
+> 本轮目标是让问题**可见**（flag + score 0.95 → 0.89），这一层已经做到。
+
+### 仍未处理
+
+- **2 篇 openai 文档的结构无法恢复** —— 源 HTML 抓不到。
+  实测（2026-09-22）：重新跑 `fetch_phase0_sources.py --only openai_agents_api`，
+  openai.com 返回的是 **Cloudflare 挑战页**（`<title>请稍候…</title>`，11414 字节），
+  不是正文。**换抓取方式（如带 cookie/浏览器指纹）或换掉这 2 篇语料。**
+
+  > 对照：用 WebFetch 取同一个 URL 能拿到完整正文，且**标题结构完好**
+  > （1 个 h1 + 7 个 h2 + 3 个 h3）。所以**源页面是有结构的，是我们没抓到**。
+
+- ⚠️ **顺带修了一个抓取守卫的漏洞**（`fetch_phase0_sources.py`）：
+  原先只用 `len(html) < 5000` 判断抓取是否成功，而**挑战页有 1 万多字节**，
+  轻松过关 → 挑战页会被当成正文写进 `experiments/_sources/`，
+  后续解析出一篇**没有标题、没有正文**的"文档"却毫无告警。
+  已新增 `_looks_like_challenge()`（在开头 30KB 里找
+  `just a moment` / `请稍候` / `enable javascript` / `cf-challenge` 等特征），
+  写盘前拦截，并给出可操作的失败信息。回归测试 `tests/test_fetch_guard.py`（6 例）。
+
+---
 
 ## 现象
 

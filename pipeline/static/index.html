@@ -79,6 +79,10 @@
   .chip.dense{color:#0f766e; background:var(--accent-weak); border-color:#b7ded9}
   .chip.sparse{color:#7c3aed; background:#f3e8ff; border-color:#ddd0f7}
   .chip.rrf{color:#b45309; background:#fef3c7; border-color:#f2dfa0}
+  /* 来源文档：调试时"这段来自哪篇"是最该一眼看到的信息，给它一点重量 */
+  .chip.file{color:#334155; background:#e2e8f0; border-color:#cbd5e1; font-weight:550}
+  /* 无章节：显式写出来，别留空 chip（空 chip 看起来像 bug） */
+  .chip.nosec{color:var(--hi); background:var(--hi-bg); border-color:#f2dfa0}
   .hit-body{padding:12px 14px; white-space:pre-wrap; word-break:break-word}
   mark{background:var(--hi-bg); color:inherit; padding:0 1px; border-radius:2px}
   .empty{color:var(--muted); text-align:center; padding:40px 0}
@@ -106,6 +110,44 @@
     border:1px solid var(--line); background:var(--bg);
     border-radius:4px; padding:3px 8px;
   }
+  /* ---- 拒答阈值滑块 ---- */
+  .thrbar{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    margin-top:10px; padding:11px 14px;
+  }
+  .thrbar-left{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+  .thrbar-left label{font-size:12px; color:var(--muted); font-weight:500}
+  .thrval{
+    font-variant-numeric:tabular-nums; font-weight:650; font-size:13px;
+    color:var(--accent); min-width:56px;
+  }
+  #thr{width:100%; margin:9px 0 2px; accent-color:var(--accent); cursor:pointer}
+  .thrnote{font-size:12px; color:var(--muted)}
+  button.tiny{font-size:12px; padding:3px 10px; font-weight:500}
+  /* 模拟判定与服务端实际不一致时提醒 —— 否则用户会以为拖滑块改变了服务端行为 */
+  .differ{color:var(--hi); font-weight:650}
+  /* ---- 拒答 ---- */
+  .abstain{
+    background:#fffbeb; border:1px solid #f2dfa0; color:#78350f;
+    border-radius:var(--radius); margin-bottom:14px; overflow:hidden;
+  }
+  .abstain-head{
+    display:flex; align-items:center; gap:10px;
+    padding:11px 14px; border-bottom:1px solid #f2dfa0;
+    background:#fef3c7; font-weight:650;
+  }
+  .abstain-body{padding:12px 14px; font-size:13px}
+  .abstain-body .kv{
+    font-variant-numeric:tabular-nums; font-weight:650;
+  }
+  .gate{
+    font-variant-numeric:tabular-nums; font-size:12.5px;
+    border-radius:4px; padding:1px 7px; border:1px solid var(--line);
+    background:var(--bg); color:var(--muted);
+  }
+  .gate.pass{color:#0f766e; background:var(--accent-weak); border-color:#b7ded9}
+  .gate.fail{color:var(--hi); background:var(--hi-bg); border-color:#f2dfa0}
+  .gate.off{opacity:.65}
 
 </style>
 </head>
@@ -161,7 +203,22 @@
     <button id="go">执行</button>
   </div>
 
+  <div class="thrbar">
+    <div class="thrbar-left">
+      <label for="thr">拒答阈值（拖拽试边界）</label>
+      <span class="thrval" id="thrv">—</span>
+      <button class="ghost tiny" id="thrreset">回到服务端值</button>
+    </div>
+    <!-- step 必须够细：0.001 会把 0.5285 吸附成 0.529，
+         于是滑块一进来就被判成「模拟」（和服务端值不等） -->
+    <input id="thr" type="range" min="0" max="0.9" step="0.0001" value="0.5285">
+    <div class="thrnote" id="thrnote">
+      拖动只改**判定显示**，不重发请求 —— 用它看「这个分数离边界有多远」。
+    </div>
+  </div>
+
   <div class="stats" id="stats"></div>
+  <div id="simnote"></div>
   <div id="err"></div>
   <div id="out"><div class="empty">输入查询开始检索</div></div>
 </main>
@@ -202,10 +259,16 @@ async function loadInfo(){
   try{
     const r = await fetch("/api/info");
     const d = await r.json();
+    const ab = d.abstain_enabled
+      ? `拒答阈值 <b>${Number(d.abstain_threshold).toFixed(4)}</b>`
+      : `拒答 <b>关闭</b>`;
     $("info").innerHTML =
       `集合 <b>${esc(d.collection)}</b> · ${d.points_count} 个点 · ` +
       `sparse <b>${esc(d.sparse_collection)}</b> ${d.sparse_points_count} 点 · ` +
-      `${d.vector_size} 维 · ${esc(d.distance)} · <b>${esc(d.model)}</b>`;
+      `${d.vector_size} 维 · ${esc(d.distance)} · <b>${esc(d.model)}</b> · ${ab}`;
+    // 滑块的"服务端值"就是它；初始位置也对齐
+    serverThr = Number(d.abstain_threshold) || 0;
+    if (serverThr > 0){ $("thr").value = serverThr; $("thrv").textContent = serverThr.toFixed(4); }
   }catch(e){
     $("info").textContent = "无法连接服务";
   }
@@ -216,6 +279,72 @@ async function loadInfo(){
       .map(s => `<option value="${esc(s)}">`).join("");
   }catch(e){}
 }
+
+// 拒答闸门的小标签：显示 top-1 相似度 / 阈值 / 判定。
+// 关闭时也要显示分数 —— 否则用户没法判断"要是开了会不会被拒"。
+// thr 显式传入（不再直接读响应里的值），这样滑块能改判定显示。
+function gateChip(d, thr){
+  const s = d.dense_top_score;
+  const off = thr === null || thr === undefined || thr <= 0;
+  if (off){
+    return s === null || s === undefined
+      ? `<span class="gate off">拒答关闭</span>`
+      : `<span class="gate off">top1 ${s.toFixed(3)} · 拒答关闭</span>`;
+  }
+  if (s === null || s === undefined){
+    return `<span class="gate off">无 top1（${esc(d.mode)} 未跑 dense）</span>`;
+  }
+  const pass = s >= thr;
+  const sim = Math.abs(thr - (d.abstain_threshold || 0)) > 1e-9;
+  const actualPass = !d.abstained;
+  // 模拟判定和服务端实际不一致时明确标出来 ——
+  // 否则用户会以为拖滑块改变了服务端行为（其实只改了显示）
+  const differ = sim && (pass !== actualPass)
+    ? ` <span class="differ">（服务端实际：${actualPass ? "作答" : "拒答"}）</span>` : "";
+  return `<span class="gate ${pass ? "pass" : "fail"}">` +
+         `top1 ${s.toFixed(3)} ${pass ? "≥" : "<"} 阈值 ${thr.toFixed(4)}` +
+         ` → ${pass ? "作答" : "拒答"}${sim ? "（模拟）" : ""}</span>${differ}`;
+}
+
+// ---- 阈值滑块 ----
+// **纯前端模拟**：只改判定显示，不重发请求。
+// 为什么不走服务端：阈值是服务配置，让请求覆盖它等于把「拒答」变成可绕过的；
+// 而这里要回答的只是「这个分数离边界有多远」—— 那个用 dense_top_score 就能算。
+let lastResp = null;
+let serverThr = 0;
+
+function currentThr(){ return Number($("thr").value); }
+
+function updateGate(){
+  if (!lastResp) return;
+  const d = lastResp;
+  const thr = currentThr();
+  $("thrv").textContent = thr.toFixed(4);
+  const chip = gateChip(d, thr);
+  // 只替换统计行末尾的闸门标签，避免整行重算
+  const holder = $("gate");
+  if (holder) holder.innerHTML = chip;
+  // 拒答横幅也同步（模拟判定说该拒答、但服务端答了 → 提示一句）
+  const sim = Math.abs(thr - serverThr) > 1e-9;
+  const note = $("simnote");
+  if (note){
+    if (!sim || d.dense_top_score == null){
+      note.innerHTML = "";
+    } else {
+      // would = 模拟判定说"该拒答"；d.abstained = 服务端实际拒答了
+      // 两者一致 → 不用提示；不一致才提示（并给出改服务端阈值的命令）
+      const would = d.dense_top_score < thr;
+      note.innerHTML = would === d.abstained ? "" :
+        `<div class="err" style="background:#fffbeb;border-color:#f2dfa0;color:#78350f">` +
+        `按阈值 <b>${thr.toFixed(4)}</b>，这条会被<b>${would ? "拒答" : "作答"}</b>；` +
+        `但服务端用的是 <b>${serverThr.toFixed(4)}</b>，实际${d.abstained ? "拒答" : "作答"}。` +
+        `（改服务端阈值：<code>RAG_ABSTAIN_THRESHOLD=${thr.toFixed(4)}</code> 后重启）</div>`;
+    }
+  }
+}
+
+$("thr").addEventListener("input", updateGate);
+$("thrreset").onclick = () => { $("thr").value = serverThr; updateGate(); };
 
 async function doSearch(){
   const query = $("q").value.trim();
@@ -262,6 +391,7 @@ async function doSearch(){
 }
 
 function render(d){
+  lastResp = d;          // 滑块要拿它重算判定
   const modeLabels = {hybrid:"Hybrid + RRF", dense:"仅 Dense", sparse:"仅 Sparse / BM25"};
   const mode = d.mode || "hybrid";
   const m = d.margin;
@@ -279,7 +409,8 @@ function render(d){
       `模型 <b>${esc(d.model)}</b>` +
       ` · Rerank <b>${d.rerank_applied ? "已启用" : "未启用"}</b>` +
       (d.rerank_ms ? ` (${d.rerank_ms} ms)` : "") +
-      (d.filtered ? ` · <b>已过滤</b>` : "");
+      (d.filtered ? ` · <b>已过滤</b>` : "") +
+      ` · <span id="gate">${gateChip(d, currentThr())}</span>`;
   } else {
     $("stats").innerHTML =
       `查询 <b>${esc(d.query)}</b> · 模式 <b>${esc(modeLabels[mode] || mode)}</b> · ` +
@@ -290,7 +421,8 @@ function render(d){
       `返回 <b>${d.hits.length}</b> 条 · ` +
       `top1-top2 分差 <b class="${marginCls}">${marginTxt}</b>` +
       (marginCls ? ` <span class="warn">（几乎并列，排序不确定）</span>` : "") +
-      (d.filtered ? ` · <b>已过滤</b>` : "");
+      (d.filtered ? ` · <b>已过滤</b>` : "") +
+      ` · <span id="gate">${gateChip(d, currentThr())}</span>`;
     if (d.rerank_error) {
       $("stats").innerHTML += `<br><span class="warn">Rerank 失败，已回退 RRF：${esc(d.rerank_error)}</span>`;
     }
@@ -301,36 +433,64 @@ function render(d){
     return;
   }
 
-  const answerHtml = d.answer ? `
+  // 拒答时用**独立的样式** —— 它不是一个"回答"，而是一次有意的拒绝。
+  // 混在正常答案里会让人以为系统真的答了。
+  const thr = d.abstain_threshold, s = d.dense_top_score;
+  const answerHtml = d.answer ? (d.abstained ? `
+    <div class="abstain">
+      <div class="abstain-head">已拒答 · 未调用生成模型</div>
+      <div class="abstain-body">
+        检索到的最高相关度 <span class="kv">${(s ?? 0).toFixed(3)}</span>
+        低于阈值 <span class="kv">${(thr ?? 0).toFixed(4)}</span>，
+        判定为「语料里没有能回答这个问题的内容」，因此不作答。
+        <br><br>${esc(d.answer)}
+      </div>
+    </div>` : `
     <div class="answer">
       <div class="answer-head"><span>回答</span><span>${esc(d.model)}</span></div>
       <div class="answer-body">${formatAnswer(d.answer)}</div>
       <div class="citations">
         ${(d.citations || []).map(c => `
-          <span class="citation" title="${esc(c.section)}">
-            [C${c.index}] ${esc(c.file_name || "unknown")} · p${c.page ?? "?"}
+          <span class="citation" title="${esc(c.section || "无章节")}">
+            [C${c.index}] ${esc(c.file_name || "unknown")}${c.page == null ? "" : ` · p${c.page}`}
           </span>`).join("")}
       </div>
-    </div>` : "";
+    </div>`) : "";
 
-  $("out").innerHTML = answerHtml + d.hits.map((h, i) => `
+  $("out").innerHTML = answerHtml + d.hits.map((h, i) => {
+    // 章节：优先显示完整 section_path（比单个 section 更有信息量）。
+    // 为空时**显式写「无章节」**而不是留个空 chip —— 空 chip 看起来像 bug，
+    // 而"这块没有章节"本身是有用的信息（说明该文档丢了结构，见 issue 05）。
+    const path = (h.section_path && h.section_path.length)
+      ? h.section_path.join(" › ")
+      : (h.section || "");
+    const secChip = path
+      ? `<span class="chip sec" title="${esc(path)}">${esc(path)}</span>`
+      : `<span class="chip nosec" title="该块没有章节信息（文档可能丢了标题结构）">无章节</span>`;
+    // 页码：没有就**不显示**，而不是显示 "p?" —— 本语料全是 HTML/MD，永远没有页
+    const pageChip = (h.page === null || h.page === undefined)
+      ? "" : `<span class="chip">p${h.page}</span>`;
+    return `
     <div class="hit ${i === 0 ? "top" : ""}">
       <div class="hit-head">
         <span class="rank">#${h.rank}</span>
         <span class="score ${scoreClass(h.score, mode)}">${h.score.toFixed(mode === "hybrid" ? 5 : 4)}</span>
+        ${h.file_name ? `<span class="chip file" title="来自哪篇文档">${esc(h.file_name)}</span>` : ""}
         <span class="chip">ID ${esc(String(h.point_id))}</span>
         ${h.dense_rank != null ? `<span class="chip dense">D#${h.dense_rank}</span>` : ""}
         ${h.sparse_rank != null ? `<span class="chip sparse">S#${h.sparse_rank}</span>` : ""}
         ${h.rrf_score != null ? `<span class="chip rrf">RRF ${h.rrf_score.toFixed(5)}</span>` : ""}
         ${h.rerank_score != null ? `<span class="chip rrf">Rerank ${h.rerank_score.toFixed(4)}</span>` : ""}
         ${h.pre_rerank_rank != null ? `<span class="chip">原排名 #${h.pre_rerank_rank}</span>` : ""}
-        <span class="chip">p${h.page ?? "?"}</span>
+        ${pageChip}
         <span class="chip">${h.char_count ?? "?"} 字</span>
-        <span class="chip sec" title="${esc(h.section)}">${esc(h.section)}</span>
+        ${secChip}
       </div>
       <div class="hit-body">${highlight(h.text, d.query)}</div>
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
+
+  updateGate();   // 新结果进来后重算闸门标签与模拟提示
 }
 
 $("go").onclick = doSearch;

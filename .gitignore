@@ -12,6 +12,12 @@ __pycache__/
 # 各家 API Key 文件（.dashscope_key / .voyage_key / …）
 pipeline/.*_key
 pipeline/.dashscope_key
+# 标定产物：拒答阈值是「语料 + 嵌入模型」绑定的，属环境特定配置，不入库
+pipeline/.abstain_threshold
+# 浏览器调试产物（playwright-cli 的快照/截图/console 日志）
+.playwright-cli/
+pipeline/.playwright-cli/
+pipeline/shot*.png
 
 # 虚拟环境
 .venv/
