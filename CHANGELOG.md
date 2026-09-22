@@ -28,7 +28,13 @@
   一次评估要打 39 次，不重试几乎全被丢弃（实测 37/39 失败）。
   官方限速表：绑卡后（Tier 1）是 **2000 RPM / 4M TPM**（差 667 倍），
   且「Even with a payment method entered, the free tokens will still apply」。
-  新增 `tests/test_reranker.py`（14 例，钉住两家的请求体形状差异）。
+  **另加主动限速** `min_interval`（`VOYAGE_RERANK_MIN_INTERVAL`）：
+  限速按分钟计，撞 429 再退避等于白打一次请求、还要等一整轮窗口；
+  已知档位时直接按间隔发更省。未绑卡档位的瓶颈是 **TPM** 而非 RPM ——
+  每次 ~6,900 token ÷ 10K TPM ≈ 1.45 次/分钟 → 间隔约 **41s**。
+  ⚠️ 退避上限 30s（4 次重试）时重试仍会失败（实测 25/39 条 429），
+  故默认重试次数提到 **7**（累计可等 ~182s）。
+  新增 `tests/test_reranker.py`（16 例，含主动限速的间隔断言）。
 - **评估器新增「拒答能力（负样本）」一节**（`eval/run_eval.py`）：
   qrels 里有 5 条 `unanswerable`，注释写着「考系统会不会硬答」，但评估器只算检索
   指标、而检索**永远返回 top-k** —— 这个点一直没有对应的数字。

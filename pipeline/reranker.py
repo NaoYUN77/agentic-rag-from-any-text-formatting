@@ -135,8 +135,9 @@ class VoyageReranker:
         api_url: str = VOYAGE_RERANK_URL,
         timeout: float = 60.0,
         truncation: bool = True,
-        max_retries: int = 4,
+        max_retries: int = 7,
         retry_base: float = 2.0,
+        min_interval: float = 0.0,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -145,6 +146,15 @@ class VoyageReranker:
         self.truncation = truncation
         self.max_retries = max(0, max_retries)
         self.retry_base = retry_base
+        # 两次调用之间的最小间隔（秒）。0 = 不限速。
+        #
+        # 为什么需要「主动」限速而不是只靠 429 重试：限速是按分钟计的，
+        # 撞上 429 再退避等于白打一次请求、还要等一整轮窗口。
+        # 已知档位时直接设成对应间隔更省 —— 例如未绑卡档位
+        # 3 RPM / 10K TPM、每次 ~6,900 token，瓶颈是 TPM：
+        # 10_000 / 6_900 ≈ 1.45 次/分钟 → 间隔约 41s。
+        self.min_interval = max(0.0, min_interval)
+        self._last_call = 0.0
 
     @classmethod
     def from_env(cls) -> "VoyageReranker":
@@ -156,7 +166,8 @@ class VoyageReranker:
             model=os.getenv("VOYAGE_RERANK_MODEL", "rerank-2.5-lite"),
             api_url=os.getenv("VOYAGE_RERANK_API_URL", VOYAGE_RERANK_URL),
             timeout=float(os.getenv("VOYAGE_RERANK_TIMEOUT", "60")),
-            max_retries=int(os.getenv("VOYAGE_RERANK_RETRIES", "4")),
+            max_retries=int(os.getenv("VOYAGE_RERANK_RETRIES", "7")),
+            min_interval=float(os.getenv("VOYAGE_RERANK_MIN_INTERVAL", "0")),
         )
 
     @staticmethod
@@ -176,14 +187,30 @@ class VoyageReranker:
         except (TypeError, ValueError):
             return None
 
-    def _post(self, payload: dict):
-        """POST + 429 指数退避重试（官方推荐做法）。
+    def _pace(self) -> None:
+        """主动限速：距上次调用不足 min_interval 就先等一等。
 
-        限速是按分钟计的，所以退避要够长 —— 起始 2s、翻倍、封顶 60s。
+        限速是按分钟计的，撞上 429 再退避等于白打一次请求、还要等一整轮窗口。
+        已知档位时直接按间隔发更省。
+        """
+        if self.min_interval <= 0:
+            return
+        gap = time.monotonic() - self._last_call
+        if self._last_call and gap < self.min_interval:
+            time.sleep(self.min_interval - gap)
+
+    def _post(self, payload: dict):
+        """POST + 主动限速 + 429 指数退避重试（官方推荐做法）。
+
+        ⚠️ 退避要够长才有效：未绑卡档位的瓶颈是 **TPM**（10K/分钟），
+        每次 ~6,900 token 意味着两次调用至少要隔 ~41s。
+        退避上限 30s（2+4+8+16）时重试仍会失败 —— 实测 25/39 条 429。
+        现在默认 7 次、封顶 60s，累计可等 ~182s。
         """
         delay = self.retry_base
         response = None
         for attempt in range(self.max_retries + 1):
+            self._pace()
             response = requests.post(
                 self.api_url,
                 headers={
@@ -193,6 +220,7 @@ class VoyageReranker:
                 json=payload,
                 timeout=self.timeout,
             )
+            self._last_call = time.monotonic()
             if response.status_code != 429 or attempt == self.max_retries:
                 return response
             wait = self._retry_after(response) or delay

@@ -164,6 +164,45 @@ class VoyageRerankerTests(unittest.TestCase):
                 "q", hits("a"), top_k=1)
         self.assertEqual(sleeper.call_args_list[0].args[0], 7.0)
 
+    def test_min_interval_paces_consecutive_calls(self) -> None:
+        """主动限速：两次调用之间至少隔 min_interval。
+
+        限速按分钟计，撞 429 再退避等于白打一次请求。已知档位时直接按间隔发更省 ——
+        未绑卡档位的瓶颈是 TPM（10K/分钟，每次 ~6,900 token → 约 41s 间隔）。
+        """
+        clock = {"t": 100.0}
+        sleeps = []
+        calls = {"n": 0}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            calls["n"] += 1
+            return _Resp({"data": [{"index": 0, "relevance_score": 0.5}]})
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            clock["t"] += seconds
+
+        with patch("reranker.requests.post", fake_post), \
+                patch("reranker.time.monotonic", lambda: clock["t"]), \
+                patch("reranker.time.sleep", fake_sleep):
+            reranker = VoyageReranker(api_key="k", min_interval=10.0)
+            reranker.rerank("q", hits("a"), top_k=1)      # 首次：不等待
+            reranker.rerank("q", hits("a"), top_k=1)      # 第二次：等满 10s
+            clock["t"] += 3.0                              # 只过了 3s
+            reranker.rerank("q", hits("a"), top_k=1)      # 第三次：补等 7s
+
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(sleeps, [10.0, 7.0])
+
+    def test_min_interval_zero_does_not_sleep(self) -> None:
+        with patch("reranker.requests.post") as post, \
+                patch("reranker.time.sleep") as sleeper:
+            post.return_value = _Resp({"data": [{"index": 0, "relevance_score": 0.5}]})
+            r = VoyageReranker(api_key="k")        # 默认 min_interval=0
+            r.rerank("q", hits("a"), top_k=1)
+            r.rerank("q", hits("a"), top_k=1)
+        sleeper.assert_not_called()
+
 
 class DashScopeRerankerTests(unittest.TestCase):
     def test_request_body_is_nested(self) -> None:
