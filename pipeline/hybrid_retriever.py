@@ -48,6 +48,31 @@ def _top_dense(hits: Sequence[RetrievalHit]) -> Optional[float]:
     return float(score) if score is not None else None
 
 
+def resolve_depths(limit: int, mode: str, candidate_k: int) -> int:
+    """每路要搜多深，才能供得上 `limit` 条结果。
+
+    **为什么需要**：`candidate_k` 是**每路**深度，`limit` 是最终条数。
+    两者没有约束关系时会**静默少给内容** —— 不报错，只是结果变少：
+
+    - `hybrid`：dense ∪ sparse，每路 `candidate_k` 条
+    - `dense` / `sparse`：单路，最多 `candidate_k` 条
+
+    ⚠️ **不能按 `ceil(limit/2)` 算** —— 那样只在两路完全不重叠时成立。
+    实测 `candidate_k=ceil(45/2)=23` 时，要 45 条只拿到 **34 条**：
+    两个通道命中的块大量重叠（同一块既在 dense top-k 又在 sparse top-k），
+    并集远小于 `2 × candidate_k`。
+
+    所以取 **`candidate_k >= limit`** —— 单路时这是充要条件；
+    hybrid 时保证至少一路能供满 `limit` 条（并集只会更多）。
+    代价很小：dense 的 query 向量与 k 无关（只算一次），
+    sparse 是纯本地计算，加深几乎免费。
+
+    ⚠️ 这是"数量不足"类问题，不会报错，调用方很难发现 —— 与
+    `rag_server` 里「rerank 失败不截断」「候选池小于 top_k」是同一族。
+    """
+    return max(candidate_k, limit)
+
+
 class HybridRetriever:
     def __init__(
         self,

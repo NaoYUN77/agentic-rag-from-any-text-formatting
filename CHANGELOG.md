@@ -268,6 +268,20 @@
 
 ### Fixed
 
+- **`top_k` 契约被静默破坏（两个"少给内容"的路径）**：调用方要 N 条却拿到更少，
+  **不报错**，只是结果变少 —— 这类问题在指标上看不出来，极难发现。
+  1. **候选池小于 `top_k`**：`candidate_limit = rerank_candidate_k`（默认 20），
+     而 `top_k` 上限 50 → `top_k=30` 只能拿到 20。
+     修法：`max(limit, rerank_candidate_k)`。
+  2. **每路深度不够**：`candidate_k` 是**每路**深度，hybrid 是两路并集
+     → `candidate_k=20`、要 45 条只拿到 34 条。
+     ⚠️ **不能按 `ceil(limit/2)` 算** —— 那样只在两路完全不重叠时成立；
+     实测取 23 时仍只拿到 34 条（两路命中大量重叠，并集远小于 2×k）。
+     修法：新增 `hybrid_retriever.resolve_depths()`，取 `max(candidate_k, limit)`。
+     代价很小：dense 的 query 向量与 k 无关（只算一次），sparse 是纯本地计算。
+  **实测**：`top_k` ∈ {5,20,30,45,50} × mode ∈ {hybrid,dense,sparse} 共 **15/15 全部满足**
+  （修复前 hybrid 45→34、50→37；dense 30→20）。
+  新增 `tests/test_retrieval_depths.py`（6 例，含「不能按 limit/2 算」的关键回归）。
 - **rerank 失败时返回条数不受 `top_k` 约束**（`rag_server._retrieve_with_rerank`）：
   rerank 抛异常时 `hits` 还是**候选列表**（`rerank_candidate_k` 条，默认 20），
   没有截回 `limit` —— 调用方要 3 条却拿到 20 条。

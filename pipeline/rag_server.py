@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
 from embeddings import build_embeddings
-from hybrid_retriever import HybridRetriever
+from hybrid_retriever import HybridRetriever, resolve_depths
 from generation import QwenChatGenerator
 from reranker import DashScopeReranker, VoyageReranker, build_reranker
 from abstention import ABSTAIN_ANSWER, load_threshold, should_abstain
@@ -283,14 +283,20 @@ def _retrieve_with_rerank(req: SearchRequest, limit: int) -> tuple:
     # 具体实现由 RAG_RERANKER 决定（voyage / dashscope / none）。
     # 注意: 原注解写的是 DashScopeReranker, 但那个名字从未导入过 —— 见 F821。
     reranker: VoyageReranker | DashScopeReranker | None = _state["reranker"]
-    candidate_limit = req.rerank_candidate_k if req.rerank else limit
+    # 候选池必须**至少**有 limit 条 —— 否则 rerank 最多只能吐出候选池那么多，
+    # 调用方要 top_k=30 却只拿到 20（rerank_candidate_k 默认 20，而 top_k 上限 50）。
+    # 这是个静默的"数量不足"：不会报错，只是少给内容，调用方很难发现。
+    candidate_limit = max(limit, req.rerank_candidate_k) if req.rerank else limit
+    # 每路深度同理：candidate_k 是**每路**的，要能供上 limit 条。
+    # 不补的话 hybrid 最多给 2×candidate_k 条（实测 candidate_k=20、要 45 条只给 31 条）。
+    candidate_k = resolve_depths(limit, req.mode, req.candidate_k)
 
     t0 = time.perf_counter()
     result = retriever.search(
         query=req.query,
         mode=req.mode,
         limit=candidate_limit,
-        candidate_k=req.candidate_k,
+        candidate_k=candidate_k,
         rrf_k=req.rrf_k,
         section=req.section,
     )
