@@ -214,6 +214,18 @@
 
 ### Verified
 
+- **块粒度下限「不值得修」**（issue 02）：当前 113 chunks 的 token 分布
+  `min=11 p50=206 max=794`，**>800 的 0 个**（上限守住了），
+  但 **<100 的 18 个（15.9%）** —— 下限仍是单边，最小只有 11 token。
+  这些 tiny chunk 确实在挤占位置：**dense 的 top-5 里有 9.7% 是它们**。
+  但用现有评估数据模拟「过滤掉 tiny」后：
+  hit@5 **完全不变**（0.941/0.929/0.971），MRR@10 在 rrf 上只 **+0.008**、
+  dense **+0.009**、而 **sparse 反而 −0.014**。
+  → **不值得修**：收益在 n=34 的噪声内，且过滤不是无代价的。
+  **判据：占位 ≠ 有害** —— tiny chunk 占的位置本来也不会是 gold，
+  判断危害要看**相对 gold 的排名**，不是看它在结果里的占比。
+  真要修需「最小块约束」，而它不能跨章节合并（会重新引入 issue 06），
+  改动量明显大于收益。
 - 10 个单元与集成测试通过。
 - Anthropic Contextual Retrieval 文章：78 blocks、17 chunks、17 dense points、17 sparse points。
 - 旧 FastAPI 已通过 Dense、Sparse、Hybrid、Rerank 和 Answer 接口验证。
