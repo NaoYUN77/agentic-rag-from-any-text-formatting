@@ -122,7 +122,18 @@ class VoyageReranker:
     - **绑卡后（Tier 1）**：`2000 RPM / 4M TPM`（差 667 倍）
     - 官方明说「**Even with a payment method entered, the free tokens will still apply**」
       —— 绑卡不等于扣钱，免费额度照用。
-    - 所以本类默认带 429 退避重试；但 3 RPM 下重试也只是把失败变成很慢。
+
+    ⚠️ **TPM 的 token 口径很反直觉**（官方 FAQ）：
+    `query_token × 文档数 + 所有文档 token 和`。
+    所以 20 个候选文档时，一次调用约
+    `15 × 20 + 20 × 500 ≈ 10,300` token —— **光 query 就被乘了 20 倍**。
+    未绑卡档位 10K TPM → 每分钟只能 **0.97 次** → 两次调用至少隔 **62 秒**。
+    39 条评估因此有 **~40 分钟的物理下限**，加限速只能保证不失败、不能更快。
+
+    ⚠️ 别把 `min_interval` 设小了「省时间」—— 设成 41s（每分钟 1.46 次）
+    会让**每一次调用都超限**，于是重试不断、总时长反而涨到 1 小时以上（实测踩过）。
+    想真正提速只有两条路：绑卡（4M TPM），或把 `candidate_k` 降到 10
+    （`15×10 + 10×500 ≈ 5,150` token/次，约 20 分钟）。
 
     实测（2026-09-22，rerank-2.5-lite）：
     3 篇短文档 + 1 个中文 query = 82 token，返回按分数降序的 `data[]`。
@@ -135,7 +146,7 @@ class VoyageReranker:
         api_url: str = VOYAGE_RERANK_URL,
         timeout: float = 60.0,
         truncation: bool = True,
-        max_retries: int = 7,
+        max_retries: int = 4,
         retry_base: float = 2.0,
         min_interval: float = 0.0,
     ) -> None:
@@ -144,15 +155,16 @@ class VoyageReranker:
         self.api_url = api_url
         self.timeout = timeout
         self.truncation = truncation
+        # ⚠️ 批量跑时重试次数要**克制**：退避是复利式的，7 次重试最坏等 182s，
+        # 39 条就是 1 小时以上。批量场景应该靠 min_interval 提前限速，
+        # 而不是撞了 429 再等。生产（单次查询）可以调大。
         self.max_retries = max(0, max_retries)
         self.retry_base = retry_base
         # 两次调用之间的最小间隔（秒）。0 = 不限速。
         #
-        # 为什么需要「主动」限速而不是只靠 429 重试：限速是按分钟计的，
+        # 为什么需要「主动」限速而不是只靠 429 重试：限速按分钟计，
         # 撞上 429 再退避等于白打一次请求、还要等一整轮窗口。
-        # 已知档位时直接设成对应间隔更省 —— 例如未绑卡档位
-        # 3 RPM / 10K TPM、每次 ~6,900 token，瓶颈是 TPM：
-        # 10_000 / 6_900 ≈ 1.45 次/分钟 → 间隔约 41s。
+        # 未绑卡档位（10K TPM、20 候选）应设 **62 秒** —— 见类 docstring 的 token 口径。
         self.min_interval = max(0.0, min_interval)
         self._last_call = 0.0
 
@@ -166,7 +178,7 @@ class VoyageReranker:
             model=os.getenv("VOYAGE_RERANK_MODEL", "rerank-2.5-lite"),
             api_url=os.getenv("VOYAGE_RERANK_API_URL", VOYAGE_RERANK_URL),
             timeout=float(os.getenv("VOYAGE_RERANK_TIMEOUT", "60")),
-            max_retries=int(os.getenv("VOYAGE_RERANK_RETRIES", "7")),
+            max_retries=int(os.getenv("VOYAGE_RERANK_RETRIES", "4")),
             min_interval=float(os.getenv("VOYAGE_RERANK_MIN_INTERVAL", "0")),
         )
 
@@ -202,10 +214,10 @@ class VoyageReranker:
     def _post(self, payload: dict):
         """POST + 主动限速 + 429 指数退避重试（官方推荐做法）。
 
-        ⚠️ 退避要够长才有效：未绑卡档位的瓶颈是 **TPM**（10K/分钟），
-        每次 ~6,900 token 意味着两次调用至少要隔 ~41s。
-        退避上限 30s（2+4+8+16）时重试仍会失败 —— 实测 25/39 条 429。
-        现在默认 7 次、封顶 60s，累计可等 ~182s。
+        ⚠️ 重试是**兜底**，不是提速手段。退避是复利式的：7 次重试最坏等 182s，
+        39 条就是 1 小时以上。批量场景应该用 `min_interval` 提前限速 ——
+        未绑卡档位（10K TPM、20 候选）应设 62 秒（见类 docstring 的 token 口径）。
+        把 `min_interval` 设小了反而会让每次调用都超限，总时长更长（实测踩过）。
         """
         delay = self.retry_base
         response = None
