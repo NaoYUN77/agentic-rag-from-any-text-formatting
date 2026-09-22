@@ -4,6 +4,17 @@
 
 ### Added
 
+- **质量门新增「结构保真度」维度**（`ingest/quality.py::_structural_fidelity`）：
+  此前质量门只看 token 数、长度分布、重复率、乱码率 —— 对「结构丢了」完全无感。
+  issues 11/12 的三次回归（heading 层级被压平、`section_path` 大面积为空、
+  PDF 页码完全丢失）当时**一个都没被发现** —— 一本讲配置的手册丢了全部配置示例，
+  质量分仍是 0.99。新增三个判据（都取「有前提才检查」，避免假警报）：
+  `pdf_without_page_numbers`（仅 PDF）、`flat_heading_levels`（标题 ≥5 且层级 ≤1）、
+  `section_path_all_empty`（标题 ≥3 且正文覆盖率 = 0）。
+  每个 flag 只扣 0.06 分 —— 目的是**可见** + 压到 medium 提示人工看一眼，
+  不是把文档一棒打死（结构坏了内容往往还在，仍值得进索引）；并写进 `reasons`。
+  实测零误报：真实 PDF `score=0.9902 flags=[]`，7 篇 URL 语料全部 ok。
+  新增 `tests/test_quality.py`（8 例）。
 - **VoyageAI rerank 客户端**（`reranker.VoyageReranker`，模型 `rerank-2.5-lite`）：
   百炼的 rerank 免费额度已耗尽（403 `FreeTierOnly`），改走 VoyageAI。
   ⚠️ **两家协议不同，不能只换 URL** —— Voyage 的请求体是**扁平**的
